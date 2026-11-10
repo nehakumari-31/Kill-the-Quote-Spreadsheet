@@ -1,0 +1,11 @@
+# Node / React
+procurement-copilot/node_modules/
+procurement-copilot/dist/
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
