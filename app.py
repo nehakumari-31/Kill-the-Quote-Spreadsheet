@@ -26,6 +26,7 @@ import re
 import io
 import base64
 from datetime import datetime
+from typing import Optional, Dict, Any, List, Tuple
 
 # Load user site-packages if needed
 user_site_packages = os.path.expanduser("~/Library/Python/3.9/lib/python/site-packages")
@@ -163,12 +164,15 @@ from core.config import (
     TAKEUP_FACTORS,
     DEFAULT_FX_RATE as FX_RATE,
     DEFAULT_FX_EFFECTIVE_DATE,
-    DEFAULT_FREIGHT_RATES as FREIGHT_RATES
+    DEFAULT_FREIGHT_RATES as FREIGHT_RATES,
+    DEFAULT_CONDITIONAL_DISCOUNTS
 )
 from core.normalizer import (
     calculate_composite_weight,
     normalize_price,
-    parse_uom
+    parse_uom,
+    validate_technical_specification,
+    calculate_price_per_kg
 )
 from core.eligibility import (
     evaluate_vendor_qualifications,
@@ -253,30 +257,53 @@ def initialize_database():
     df_gate = pd.read_excel(xl, sheet_name="Questionnaire Audit & Gate")
 
     # 4. Deterministic composite weight calculator (kg/UoM)
+    # Strictly adheres to core.config and core.normalizer (single source of truth).
+    # Never silently substitutes dimensions (e.g. 1000 x 500 mm) or weights (e.g. 0.25 kg).
     weights = {}
+    weights_reason = {}
     for _, r in df_items.iterrows():
         l_no = int(r["Line #"])
-        ply = float(r.get("Ply", 3))
-        flute = str(r.get("Flute", "B")).strip()
-        liner_gsm = float(r.get("Liner GSM (each)", 150))
-        fluting_gsm = float(r.get("Fluting GSM (each)", 120))
-        bl = float(r.get("Board size L (mm)", 0)) if pd.notna(r.get("Board size L (mm)")) else None
-        bw = float(r.get("Board size W (mm)", 0)) if pd.notna(r.get("Board size W (mm)")) else None
-        _, wt = calculate_composite_weight(
+        ply = float(r["Ply"]) if pd.notna(r.get("Ply")) else None
+        flute = str(r["Flute"]).strip() if pd.notna(r.get("Flute")) else None
+        liner_gsm = float(r["Liner GSM (each)"]) if pd.notna(r.get("Liner GSM (each)")) else None
+        fluting_gsm = float(r["Fluting GSM (each)"]) if pd.notna(r.get("Fluting GSM (each)")) else None
+        liner_bf = float(r["Liner BF (kraft)"]) if pd.notna(r.get("Liner BF (kraft)")) else None
+        bl = float(r["Board size L (mm)"]) if pd.notna(r.get("Board size L (mm)")) and float(r["Board size L (mm)"]) > 0 else None
+        bw = float(r["Board size W (mm)"]) if pd.notna(r.get("Board size W (mm)")) and float(r["Board size W (mm)"]) > 0 else None
+
+        is_valid_spec, missing_spec_inputs = validate_technical_specification(
             ply=ply,
             flute=flute,
             liner_gsm=liner_gsm,
             fluting_gsm=fluting_gsm,
             board_l_mm=bl,
-            board_w_mm=bw
+            board_w_mm=bw,
+            liner_bf=liner_bf
         )
-        weights[l_no] = round(wt, 4) if wt is not None else None
+
+        if not is_valid_spec:
+            weights[l_no] = None
+            weights_reason[l_no] = f"Insufficient technical specs: {', '.join(missing_spec_inputs)}"
+        else:
+            _, wt = calculate_composite_weight(
+                ply=ply,
+                flute=flute,
+                liner_gsm=liner_gsm,
+                fluting_gsm=fluting_gsm,
+                board_l_mm=bl,
+                board_w_mm=bw,
+                liner_bf=liner_bf
+            )
+            weights[l_no] = round(wt, 4) if wt is not None else None
+            weights_reason[l_no] = None if wt is not None else "Board dimensions or GSM invalid"
 
     st.session_state.item_weights = weights
+    st.session_state.weights_reason = weights_reason
     st.session_state.df_gate = df_gate
     st.session_state.df_items = df_items
 
     # 5. Build Initial Normalized Matrix with Source Citations
+    # All vendor quotes are normalized through core.normalizer.normalize_price
     hist_dict = df_hist.set_index("Line #").to_dict(orient="index")
     rows = []
 
@@ -293,48 +320,151 @@ def initialize_database():
         po_price = h_info.get("FY25 PO Unit Price (₹)")
         is_new_sku = (h_info.get("SKU Classification") == "New SKU") or pd.isna(po_price)
         wt = weights.get(l_no)
-        freight = FREIGHT_RATES.get(loc)
 
-        # Baseline Vendor Quotes & Citations
-        # V1: Lines 1 & 2 quoted /1,000; others standard
+        # Baseline Vendor Quotes normalized strictly through core.normalizer.normalize_price
+        # V1: Lines 1 & 2 quoted per 1,000 Nos; others standard per unit
         if l_no == 1:
-            v1_val, v1_cite = 6.12, "₹6,120 per 1,000 Nos (Normalized: 6120/1000 = ₹6.12)"
+            raw_v1, uom_v1 = 6120.0, "per 1,000 Nos"
         elif l_no == 2:
-            v1_val, v1_cite = 10.35, "₹10,350 per 1,000 Nos (Normalized: 10350/1000 = ₹10.35)"
+            raw_v1, uom_v1 = 10350.0, "per 1,000 Nos"
         else:
-            v1_val, v1_cite = round(budget * 0.98, 2), f"₹{budget * 0.98:.2f} per unit"
+            raw_v1, uom_v1 = round(budget * 0.98, 2), "Nos"
 
-        v2_val, v2_cite = round(budget * 1.01, 2), f"₹{budget * 1.01:.2f} per unit"
+        res_v1 = normalize_price(
+            raw_value=raw_v1,
+            raw_unit=uom_v1,
+            raw_currency="INR",
+            line_no=l_no,
+            delivery_location=loc,
+            item_weight_kg=wt,
+            is_new_sku=is_new_sku,
+            last_po_price=po_price,
+            fx_rate=FX_RATE,
+            freight_rates=FREIGHT_RATES,
+            freight_included=False
+        )
 
-        # V3: USD converted at FX_RATE (84.50)
+        # V2: PackTech quoted per unit with freight included
+        raw_v2, uom_v2 = round(budget * 1.01, 2), "Nos"
+        res_v2 = normalize_price(
+            raw_value=raw_v2,
+            raw_unit=uom_v2,
+            raw_currency="INR",
+            line_no=l_no,
+            delivery_location=loc,
+            item_weight_kg=wt,
+            is_new_sku=is_new_sku,
+            last_po_price=po_price,
+            fx_rate=FX_RATE,
+            freight_rates=FREIGHT_RATES,
+            freight_included=True
+        )
+
+        # V3: Global USD converted at FX_RATE (84.50); omitted on 7-ply lines (10, 21, 25, 30)
         if l_no in [10, 21, 25, 30]:
-            v3_val, v3_cite = np.nan, "NOT QUOTED (Failed Gate Q6 for 7-ply / Line Omitted)"
+            raw_v3, uom_v3, curr_v3 = "NOT QUOTED", "NOT QUOTED", "USD"
+            res_v3 = normalize_price(
+                raw_value="NOT QUOTED (Failed Gate Q6 for 7-ply / Line Omitted)",
+                raw_unit="NOT QUOTED",
+                raw_currency="USD",
+                line_no=l_no,
+                delivery_location=loc,
+                item_weight_kg=wt,
+                is_new_sku=is_new_sku,
+                fx_rate=FX_RATE,
+                freight_rates=FREIGHT_RATES
+            )
         else:
-            v3_usd = round((budget * 0.95) / FX_RATE, 4)
-            v3_val, v3_cite = round(v3_usd * FX_RATE, 2), f"USD ${v3_usd:.4f}/Nos × ₹{FX_RATE:.2f}/USD = ₹{v3_usd * FX_RATE:.2f}"
+            raw_v3 = round((budget * 0.95) / FX_RATE, 4)
+            uom_v3, curr_v3 = "Nos", "USD"
+            res_v3 = normalize_price(
+                raw_value=raw_v3,
+                raw_unit=uom_v3,
+                raw_currency=curr_v3,
+                line_no=l_no,
+                delivery_location=loc,
+                item_weight_kg=wt,
+                is_new_sku=is_new_sku,
+                fx_rate=FX_RATE,
+                freight_rates=FREIGHT_RATES,
+                freight_included=True
+            )
 
-        # V4: Disqualified
-        v4_val, v4_cite = round(budget * 0.94, 2), f"₹{budget * 0.94:.2f} (DISQUALIFIED: Expired ISO Cert Oct 2026)"
+        # V4: Sri Balaji Packaging (Disqualified in gate audit due to expired ISO cert)
+        raw_v4, uom_v4 = round(budget * 0.94, 2), "Nos"
+        res_v4 = normalize_price(
+            raw_value=raw_v4,
+            raw_unit=uom_v4,
+            raw_currency="INR",
+            line_no=l_no,
+            delivery_location=loc,
+            item_weight_kg=wt,
+            is_new_sku=is_new_sku,
+            fx_rate=FX_RATE,
+            freight_rates=FREIGHT_RATES,
+            freight_included=False
+        )
 
-        # V5: Weight-based for shippers; "Same as last year" for others; UNRESOLVED on New SKUs
+        # V5: Standard Box Corp:
+        # Weight-based for shippers; "Same as last year" for others; UNRESOLVED on New SKUs
         if l_no in [25, 27, 28, 29, 30]:
-            v5_val = np.nan
-            v5_cite = "Quote stated 'Same as last year', but line is a New SKU with no PO history -> UNRESOLVED"
-            v5_flag = "UNRESOLVED"
+            raw_v5, uom_v5 = "Same as last year", "Same as last year"
+            res_v5 = normalize_price(
+                raw_value=raw_v5,
+                raw_unit=uom_v5,
+                raw_currency="INR",
+                line_no=l_no,
+                delivery_location=loc,
+                item_weight_kg=wt,
+                is_new_sku=True,
+                last_po_price=None,
+                fx_rate=FX_RATE,
+                freight_rates=FREIGHT_RATES
+            )
         elif l_no in [1, 2, 3, 4, 5, 6, 7, 8, 9, 20]:
             rate_kg = 38.0 if l_no < 5 else 42.0
-            # Strict math: (extracted_price + freight_rate) * composite_weight
-            v5_val = round((rate_kg + freight) * wt, 2)
-            v5_cite = f"(₹{rate_kg:.2f}/kg + ₹{freight:.2f} freight) × {wt:.3f}kg = ₹{v5_val:.2f}"
-            v5_flag = "Inferred (kg to piece)"
+            raw_v5, uom_v5 = rate_kg, "₹/kg"
+            res_v5 = normalize_price(
+                raw_value=rate_kg,
+                raw_unit=uom_v5,
+                raw_currency="INR",
+                line_no=l_no,
+                delivery_location=loc,
+                item_weight_kg=wt,
+                is_new_sku=is_new_sku,
+                last_po_price=po_price,
+                fx_rate=FX_RATE,
+                freight_rates=FREIGHT_RATES,
+                freight_included=False
+            )
         elif l_no in [26]:
-            v5_val = np.nan
-            v5_cite = "Quoted standard board without moisture barrier (Failed Gate Q7)"
-            v5_flag = "Disqualified (Q7)"
+            raw_v5, uom_v5 = "DISQUALIFIED (Failed Gate Q7)", "Disqualified"
+            res_v5 = normalize_price(
+                raw_value="DISQUALIFIED: Quoted standard board without moisture barrier (Failed Gate Q7)",
+                raw_unit="Disqualified",
+                raw_currency="INR",
+                line_no=l_no,
+                delivery_location=loc,
+                item_weight_kg=wt,
+                is_new_sku=is_new_sku,
+                fx_rate=FX_RATE,
+                freight_rates=FREIGHT_RATES
+            )
         else:
-            v5_val = round(float(po_price) * 1.036, 2) if pd.notna(po_price) else round(budget, 2)
-            v5_cite = f"Resolved from FY25 PO (₹{float(po_price):.2f}) + 3.6% index" if pd.notna(po_price) else "Resolved"
-            v5_flag = "Inferred (PO History)"
+            raw_v5, uom_v5 = "Same as last year", "Same as last year"
+            res_v5 = normalize_price(
+                raw_value=raw_v5,
+                raw_unit=uom_v5,
+                raw_currency="INR",
+                line_no=l_no,
+                delivery_location=loc,
+                item_weight_kg=wt,
+                is_new_sku=is_new_sku,
+                last_po_price=po_price,
+                inflation_index=0.036,
+                fx_rate=FX_RATE,
+                freight_rates=FREIGHT_RATES
+            )
 
         rows.append({
             "Line #": l_no,
@@ -345,17 +475,37 @@ def initialize_database():
             "Criticality": crit,
             "Budget Price": budget,
             "Est. Wt (kg)": wt,
-            "V1 (Apex)": v1_val,
-            "V2 (PackTech)": v2_val,
-            "V3 (Global USD)": v3_val,
-            "V4 (Balaji)": v4_val,
-            "V5 (Standard Box)": v5_val,
-            "V1 Citation": v1_cite,
-            "V2 Citation": v2_cite,
-            "V3 Citation": v3_cite,
-            "V4 Citation": v4_cite,
-            "V5 Citation": v5_cite,
-            "V5 Trust Flag": v5_flag
+            "V1 (Apex)": res_v1.normalized_price if res_v1.normalized_price is not None else np.nan,
+            "V2 (PackTech)": res_v2.normalized_price if res_v2.normalized_price is not None else np.nan,
+            "V3 (Global USD)": res_v3.normalized_price if res_v3.normalized_price is not None else np.nan,
+            "V4 (Balaji)": res_v4.normalized_price if res_v4.normalized_price is not None else np.nan,
+            "V5 (Standard Box)": res_v5.normalized_price if res_v5.normalized_price is not None else np.nan,
+            "V1 Citation": res_v1.formula_citation,
+            "V2 Citation": res_v2.formula_citation,
+            "V3 Citation": res_v3.formula_citation,
+            "V4 Citation": res_v4.formula_citation,
+            "V5 Citation": res_v5.formula_citation,
+            "V5 Trust Flag": res_v5.trust_flag,
+            "V1 Raw Value": res_v1.original_value,
+            "V1 Raw UOM": res_v1.original_uom,
+            "V1 Status": res_v1.status,
+            "V1 Unresolved Reason": res_v1.unresolved_reason,
+            "V2 Raw Value": res_v2.original_value,
+            "V2 Raw UOM": res_v2.original_uom,
+            "V2 Status": res_v2.status,
+            "V2 Unresolved Reason": res_v2.unresolved_reason,
+            "V3 Raw Value": res_v3.original_value,
+            "V3 Raw UOM": res_v3.original_uom,
+            "V3 Status": res_v3.status,
+            "V3 Unresolved Reason": res_v3.unresolved_reason,
+            "V4 Raw Value": res_v4.original_value,
+            "V4 Raw UOM": res_v4.original_uom,
+            "V4 Status": res_v4.status,
+            "V4 Unresolved Reason": res_v4.unresolved_reason,
+            "V5 Raw Value": res_v5.original_value,
+            "V5 Raw UOM": res_v5.original_uom,
+            "V5 Status": res_v5.status,
+            "V5 Unresolved Reason": res_v5.unresolved_reason
         })
 
     st.session_state.df_norm = pd.DataFrame(rows)
@@ -559,7 +709,9 @@ def calculate_live_scenarios(df_current):
     else:
         quals = {}
 
-    return calculate_award_scenarios(df_current, quals)
+    discounts = st.session_state.get("conditional_discounts", DEFAULT_CONDITIONAL_DISCOUNTS)
+
+    return calculate_award_scenarios(df_current, quals, conditional_discounts=discounts)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -726,13 +878,19 @@ if nav == "🏠 Overview & Recommendation":
         </div>
         """, unsafe_allow_html=True)
     with k4:
-        unres_count = int(st.session_state.df_norm["V5 (Standard Box)"].isna().sum())
+        unres_count = 0
+        for v_code in ["V1", "V2", "V3", "V4", "V5"]:
+            st_col = f"{v_code} Status"
+            if st_col in st.session_state.df_norm.columns:
+                unres_count += int((st.session_state.df_norm[st_col] == "Unresolved").sum())
+            elif v_code == "V5":
+                unres_count += int((st.session_state.df_norm.get("V5 Trust Flag", "") == "UNRESOLVED").sum())
         st.markdown(f"""
         <div class="procure-card" style="padding:16px;">
             <div class="stat-label">Unresolved Quotes</div>
             <div class="stat-number" style="color:{'#b91c1c' if unres_count > 0 else '#15803d'};">{unres_count}</div>
             <div style="font-size:11px; color:#64748b; margin-top:4px;">
-                {'Requires buyer override' if unres_count > 0 else 'All quotes resolved!'}
+                {'Requires buyer review/override' if unres_count > 0 else 'All quotes resolved!'}
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -819,25 +977,85 @@ elif nav == "📊 Quote Comparison Matrix & Editor":
         for col in ["V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)"]:
             current_val = st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, col].values[0]
             edited_val = row[col]
+            v_code = col.split()[0]
 
-            # Run normalization math
-            converted_val, flag, cite = normalize_extracted_quote(edited_val, l_no, d_loc, c_wt, is_new)
+            if pd.isna(edited_val) or str(edited_val).strip() == "":
+                continue
+
+            # Run normalization math through core.normalizer (single source of truth)
+            norm_res = normalize_price(
+                raw_value=edited_val,
+                raw_unit=None,
+                raw_currency="INR",
+                line_no=l_no,
+                delivery_location=d_loc,
+                item_weight_kg=c_wt,
+                is_new_sku=is_new,
+                fx_rate=FX_RATE,
+                freight_rates=FREIGHT_RATES,
+                freight_included=False
+            )
+            converted_val = norm_res.normalized_price
+            flag = "Buyer Overridden" if norm_res.status == "Verified" else norm_res.trust_flag
+            cite = f"Buyer Overridden: '{edited_val}' -> {norm_res.formula_citation}"
 
             if pd.notna(converted_val) and (pd.isna(current_val) or abs(float(converted_val) - float(current_val)) > 1e-4):
                 st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, col] = converted_val
-                
-                cite_col = f"{col.split()[0]} Citation"
-                if cite_col in st.session_state.df_norm.columns:
-                    st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, cite_col] = f"Buyer Overridden: '{edited_val}' -> {cite}"
-
+                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Citation"] = cite
+                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Raw Value"] = edited_val
+                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Status"] = norm_res.status
+                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Unresolved Reason"] = norm_res.unresolved_reason
                 if col == "V5 (Standard Box)":
-                    st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, "V5 Trust Flag"] = "Buyer Overridden"
-
+                    st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, "V5 Trust Flag"] = flag
+                has_changes = True
+            elif norm_res.status == "Unresolved" and pd.notna(current_val):
+                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, col] = np.nan
+                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Citation"] = cite
+                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Raw Value"] = edited_val
+                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Status"] = "Unresolved"
+                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Unresolved Reason"] = norm_res.unresolved_reason
+                if col == "V5 (Standard Box)":
+                    st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, "V5 Trust Flag"] = "UNRESOLVED"
                 has_changes = True
 
     if has_changes:
         st.toast("Recalculation executed: Live math and award spend updated instantly!", icon="⚡")
         st.rerun()
+
+    # ── Unresolved Normalizations Review & Evidence Audit ──
+    unresolved_rows = []
+    for _, r in st.session_state.df_norm.iterrows():
+        l_item = int(r["Line #"])
+        item_code = r["Item Code"]
+        for v_code, v_label in [("V1", "Apex"), ("V2", "PackTech"), ("V3", "Global USD"), ("V4", "Balaji"), ("V5", "Standard Box")]:
+            status_v = r.get(f"{v_code} Status")
+            unres_r = r.get(f"{v_code} Unresolved Reason")
+            if status_v == "Unresolved" or (v_code == "V5" and r.get("V5 Trust Flag") == "UNRESOLVED"):
+                unresolved_rows.append({
+                    "Line #": l_item,
+                    "Item Code": item_code,
+                    "Vendor": v_label,
+                    "Raw Quoted Value": str(r.get(f"{v_code} Raw Value", "N/A")),
+                    "Raw UOM": str(r.get(f"{v_code} Raw UOM", "N/A")),
+                    "Reason for Unresolved Status": unres_r or "Missing conversion inputs (weight/PO history/exchange rate)",
+                    "Audit Evidence": r.get(f"{v_code} Citation", "N/A")
+                })
+
+    if unresolved_rows:
+        st.markdown("""
+        <div style="background-color:#fffbeb; border:1px solid #fde68a; border-radius:10px; padding:16px; margin:16px 0;">
+            <div style="display:flex; align-items:center; gap:8px;">
+                <span style="color:#b45309; font-size:18px;">⚠️</span>
+                <span style="font-weight:700; color:#92400e; font-size:14px;">
+                    Unresolved Normalizations Requiring Buyer Review (Excluded from Award Calculations)
+                </span>
+            </div>
+            <p style="font-size:12px; color:#b45309; margin:4px 0 10px 0;">
+                These quotes lack sufficient technical specs, dimensions, weights, or PO history. Per RFx guidelines, they are not silently converted and are excluded from L1 award allocation until clarified.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame(unresolved_rows), use_container_width=True, hide_index=True)
 
     # Traceability & Source Citation Inspector
     st.markdown("### 🔍 Live Source Citation Inspector (Raw Extraction Traceability)")
@@ -852,13 +1070,22 @@ elif nav == "📊 Quote Comparison Matrix & Editor":
 
     line_row = st.session_state.df_norm[st.session_state.df_norm["Line #"] == inspect_line].iloc[0]
     c1, c2, c3, c4, c5 = st.columns(5)
-    headers = [("V1 Citation", "Apex (V1)", c1), ("V2 Citation", "PackTech (V2)", c2), ("V3 Citation", "Global USD (V3)", c3), ("V4 Citation", "Balaji (V4)", c4), ("V5 Citation", "Std Box (V5)", c5)]
-    for rk, vtitle, vcol in headers:
+    headers = [("V1 Citation", "Apex (V1)", c1, "V1"), ("V2 Citation", "PackTech (V2)", c2, "V2"), ("V3 Citation", "Global USD (V3)", c3, "V3"), ("V4 Citation", "Balaji (V4)", c4, "V4"), ("V5 Citation", "Std Box (V5)", c5, "V5")]
+    for rk, vtitle, vcol, vcode in headers:
         with vcol:
             raw_cite = line_row.get(rk, "N/A")
+            raw_val = line_row.get(f"{vcode} Raw Value", "N/A")
+            raw_uom = line_row.get(f"{vcode} Raw UOM", "N/A")
+            v_status = line_row.get(f"{vcode} Status", "Verified")
+            unres_msg = line_row.get(f"{vcode} Unresolved Reason")
             st.markdown(f"""
             <div class="procure-card" style="padding:14px;">
                 <div style="font-weight:700; color:#0f172a; font-size:13px;">{vtitle}</div>
+                <div style="font-size:11px; color:#64748b; margin-top:2px;">Raw: <code>{raw_val} ({raw_uom})</code></div>
+                <div style="margin-top:6px;">
+                    <span style="font-size:10px; font-weight:700; color:{'#b91c1c' if v_status=='Unresolved' else '#15803d'}; text-transform:uppercase;">Status: {v_status}</span>
+                </div>
+                {f'<div style="font-size:11px; color:#b91c1c; background:#fee2e2; padding:4px 6px; border-radius:4px; margin-top:4px;"><strong>Reason:</strong> {unres_msg}</div>' if unres_msg else ''}
                 <div style="margin-top:8px;">
                     <span style="font-size:10px; font-weight:700; color:#64748b; text-transform:uppercase;">Source Citation</span>
                     <div style="font-family:monospace; font-size:11px; font-weight:700; color:#1e293b; background:#f1f5f9; padding:4px 6px; border-radius:4px; margin-top:2px;">
@@ -1008,20 +1235,33 @@ elif nav == "🎯 Live Award Scenarios Engine":
     # Conditional Discounts & Policy Exceptions
     discounts = live_scenarios.get("discounts_evaluated", {})
     if discounts:
-        st.markdown("##### 🏷️ Conditional Discounts Evaluation")
+        st.markdown("##### 🏷️ Conditional Discounts Evaluation (Scenario B Audit)")
         disc_rows = []
         for v, d in discounts.items():
             disc_rows.append({
                 "Vendor": v,
-                "Condition": d.get("description", "-"),
-                "Discount %": f"{d.get('discount_pct', 0.0)*100:.1f}%",
-                "Applied?": "Yes" if d.get("applied") else "No",
-                "Status": d.get("status", "-")
+                "Original Quoted Amount": f"₹{d.get('original_amount', 0.0):,.2f}",
+                "Eligible Discount": d.get("eligible_discount", f"{d.get('discount_pct', 0.0)*100:.1f}%"),
+                "Discount Applied": f"₹{d.get('discount_applied', 0.0):,.2f}" if d.get("applied") else "₹0.00",
+                "Discount Not Applied & Reason": d.get("discount_not_applied_reason") or "N/A (Discount Applied)",
+                "Final Award Amount": f"₹{d.get('final_award_amount', 0.0):,.2f}"
             })
         st.dataframe(pd.DataFrame(disc_rows), use_container_width=True, hide_index=True)
 
     # Detailed Line Item Allocation Tables
-    st.markdown("### 📋 Line Item Allocation Breakdown")
+    col_hdr, col_exp = st.columns([3, 1])
+    with col_hdr:
+        st.markdown("### 📋 Line Item Allocation Breakdown")
+    with col_exp:
+        if live_scenarios.get("b_line_allocations"):
+            csv_data = pd.DataFrame(live_scenarios["b_line_allocations"]).to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Export Scenario B (CSV)",
+                data=csv_data,
+                file_name="Scenario_B_Quality_Gated_Award.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
     tab_b, tab_c = st.tabs(["Scenario B: Quality-Gated L1", "Scenario C: Dual Sourcing (70/30)"])
     with tab_b:
         if live_scenarios.get("b_line_allocations"):

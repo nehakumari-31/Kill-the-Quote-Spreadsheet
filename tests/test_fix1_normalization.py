@@ -343,3 +343,146 @@ def test_10_missing_conversion_data():
     assert res_new_sku.status == "Unresolved"
     assert "FY25 Historical PO Price" in res_new_sku.missing_inputs
     assert "Buyer review required" in res_new_sku.unresolved_reason
+
+
+# 11. Technical specification validation and no silent substitution
+def test_11_validate_technical_specification_and_no_silent_defaults():
+    from core.normalizer import validate_technical_specification, calculate_price_per_kg
+
+    # Valid specification
+    is_valid, missing = validate_technical_specification(
+        ply=3, flute="B", liner_gsm=150, fluting_gsm=120, board_l_mm=1035, board_w_mm=350, liner_bf=18
+    )
+    assert is_valid is True
+    assert len(missing) == 0
+
+    # Missing dimensions: must NOT silently default to 1000x500
+    is_valid_no_dim, missing_no_dim = validate_technical_specification(
+        ply=3, flute="B", liner_gsm=150, fluting_gsm=120, board_l_mm=None, board_w_mm=None
+    )
+    assert is_valid_no_dim is False
+    assert "Board Length (mm)" in missing_no_dim
+    assert "Board Width (mm)" in missing_no_dim
+
+    # Missing GSM / flute: must NOT silently default to 150/120/B
+    is_valid_no_gsm, missing_no_gsm = validate_technical_specification(
+        ply=None, flute=None, liner_gsm=None, fluting_gsm=None
+    )
+    assert is_valid_no_gsm is False
+    assert "Ply" in missing_no_gsm
+    assert any("Flute" in m for m in missing_no_gsm)
+    assert "Liner GSM" in missing_no_gsm
+    assert "Fluting GSM" in missing_no_gsm
+
+    # calculate_composite_weight with missing dimensions must return None for weight
+    gsm, wt = calculate_composite_weight(
+        ply=3, flute="B", liner_gsm=150, fluting_gsm=120, board_l_mm=None, board_w_mm=None
+    )
+    assert gsm is not None
+    assert wt is None, "Weight must be None when board dimensions are missing; cannot invent 1000x500"
+
+
+# 12. Price per kg calculation strictly excludes unresolved items
+def test_12_price_per_kg_excludes_unresolved_items():
+    from core.normalizer import calculate_price_per_kg
+
+    # Valid price and weight
+    pkg, status = calculate_price_per_kg(landed_piece_price=10.0, item_weight_kg=0.25)
+    assert pkg == 40.0
+    assert status == "Valid"
+
+    # Missing weight -> must be None and flagged Unresolved (no default 0.25 kg)
+    pkg_no_wt, status_no_wt = calculate_price_per_kg(landed_piece_price=10.0, item_weight_kg=None)
+    assert pkg_no_wt is None
+    assert "Unresolved" in status_no_wt
+
+    # Missing/unresolved price -> must be None and flagged Unresolved
+    pkg_no_p, status_no_p = calculate_price_per_kg(landed_piece_price=None, item_weight_kg=0.25)
+    assert pkg_no_p is None
+    assert "Unresolved" in status_no_p
+
+
+# 13. Traceability of raw vendor quote and UOM even when normalization fails
+def test_13_preserves_raw_quote_and_uom_on_unresolved_failure():
+    # Per-kg quote on missing weight
+    res = normalize_price(
+        raw_value=42.0,
+        raw_unit="₹/kg",
+        item_weight_kg=None
+    )
+    assert res.normalized_price is None
+    assert res.status == "Unresolved"
+    assert res.original_value == 42.0, "Original vendor quoted price must be preserved"
+    assert res.original_uom == "₹/kg", "Original vendor quoted UOM must be preserved"
+    assert "Item weight basis (kg/UoM)" in res.missing_inputs
+    assert len(res.unresolved_reason) > 0, "Reason for unresolved normalization must be explained"
+
+
+# 14. App initialization and matrix preserves raw values and excludes unresolved from awards
+def test_14_app_initialization_no_conflicting_legacy_logic():
+    import streamlit as st
+    import app
+    assert "df_norm" in st.session_state
+    df_norm = st.session_state.df_norm
+    assert len(df_norm) == 30
+
+    # Traceability columns present
+    assert "V1 Raw Value" in df_norm.columns
+    assert "V1 Raw UOM" in df_norm.columns
+    assert "V5 Raw Value" in df_norm.columns
+    assert "V5 Raw UOM" in df_norm.columns
+    assert "V5 Status" in df_norm.columns
+    assert "V5 Unresolved Reason" in df_norm.columns
+
+    # Verify that Line 27 (New SKU) is Unresolved with preserved raw quote
+    line27 = df_norm[df_norm["Line #"] == 27].iloc[0]
+    assert line27["V5 Status"] == "Unresolved"
+    assert pd.isna(line27["V5 (Standard Box)"])
+    assert "Same as last year" in str(line27["V5 Raw Value"])
+    assert line27["V5 Unresolved Reason"] is not None
+    assert "New SKU" in line27["V5 Citation"] or "UNRESOLVED" in line27["V5 Citation"]
+
+
+# 15. Unresolved weight items excluded from award calculations and price-per-kg comparisons
+def test_15_unresolved_weight_items_excluded_from_awards_and_price_per_kg():
+    import numpy as np
+    from core.scenarios import calculate_award_scenarios
+    from core.eligibility import VendorQualification
+    from core.normalizer import calculate_price_per_kg
+
+    # Create test matrix where Line 1 has an unresolved quote for Vendor 1
+    # Vendor 1 quoted ₹38/kg but item weight is missing (None) -> normalized price is None / NaN
+    dummy_df = pd.DataFrame([{
+        "Line #": 1,
+        "Item Code": "CP-001",
+        "Description": "Test Box",
+        "Est. Qty": 1000,
+        "Delivery Location": "Pune (Chakan plant)",
+        "Criticality": "C",
+        "Budget Price": 10.0,
+        "Est. Wt (kg)": None,  # Weight cannot be calculated due to missing dimensions
+        "V1 (Apex)": np.nan,   # Unresolved due to missing weight
+        "V2 (PackTech)": 9.50,  # Valid quote
+        "V1 Citation": "Weight missing -> UNRESOLVED",
+        "V2 Citation": "₹9.50 per unit"
+    }])
+
+    dummy_quals = {
+        "V1": VendorQualification(vendor_id="V1", vendor_name="Apex", status="Eligible", passed_mandatory_gates=True),
+        "V2": VendorQualification(vendor_id="V2", vendor_name="PackTech", status="Eligible", passed_mandatory_gates=True)
+    }
+
+    scenarios = calculate_award_scenarios(dummy_df, dummy_quals)
+
+    # V1 must NOT be awarded Line 1 because the quote is unresolved
+    line_b = scenarios["b_line_allocations"][0]
+    assert line_b["Awarded Vendor"] == "V2 (PackTech)"
+    assert line_b["Landed Price (₹)"] == 9.50
+
+    # Effective price-per-kg calculation must exclude unresolved item
+    pkg_v1, status_v1 = calculate_price_per_kg(landed_piece_price=line_b["Landed Price (₹)"], item_weight_kg=None)
+    assert pkg_v1 is None
+    assert "Unresolved" in status_v1
+
+
+

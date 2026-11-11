@@ -26,6 +26,43 @@ from core.config import (
 from core.models import NormalizationResult, UnresolvedStatus
 
 
+def validate_technical_specification(
+    ply: Any,
+    flute: Any,
+    liner_gsm: Any,
+    fluting_gsm: Any,
+    board_l_mm: Any = None,
+    board_w_mm: Any = None,
+    liner_bf: Any = None,
+    uom: Any = None
+) -> Tuple[bool, List[str]]:
+    """
+    Validates technical specifications required for composite weight calculation.
+    Returns (is_valid, list_of_missing_or_invalid_inputs).
+    Never silently substitutes defaults for missing inputs.
+    """
+    missing = []
+    if ply is None or pd.isna(ply) or float(ply) <= 0:
+        missing.append("Ply")
+    flute_str = str(flute or "").strip().upper()
+    if not flute_str or flute_str not in TAKEUP_FACTORS:
+        missing.append(f"Flute ({flute or 'Missing'})")
+    if liner_gsm is None or pd.isna(liner_gsm) or float(liner_gsm) <= 0:
+        missing.append("Liner GSM")
+    if fluting_gsm is None or pd.isna(fluting_gsm) or float(fluting_gsm) <= 0:
+        missing.append("Fluting GSM")
+    if board_l_mm is None or pd.isna(board_l_mm) or float(board_l_mm) <= 0:
+        missing.append("Board Length (mm)")
+    if board_w_mm is None or pd.isna(board_w_mm) or float(board_w_mm) <= 0:
+        missing.append("Board Width (mm)")
+    if liner_bf is not None and (pd.isna(liner_bf) or float(liner_bf) <= 0):
+        missing.append("Liner BF")
+    if uom is not None and parse_uom(str(uom)) in ["unknown", "unsupported"]:
+        missing.append(f"UOM ({uom})")
+
+    return len(missing) == 0, missing
+
+
 def calculate_composite_weight(
     ply: float,
     flute: str,
@@ -33,7 +70,8 @@ def calculate_composite_weight(
     fluting_gsm: float,
     board_l_mm: Optional[float] = None,
     board_w_mm: Optional[float] = None,
-    takeup_factors: Optional[Dict[str, float]] = None
+    takeup_factors: Optional[Dict[str, float]] = None,
+    liner_bf: Optional[float] = None
 ) -> Tuple[Optional[float], Optional[float]]:
     """
     Calculates Composite GSM and Est. Weight per UoM (kg).
@@ -43,20 +81,21 @@ def calculate_composite_weight(
     Note: Takeup factor for BCB is 1.45.
     
     If board dimensions or technical parameters are missing/non-positive,
-    does NOT invent default dimensions; returns None for weight.
+    does NOT invent default dimensions (e.g. 1000 x 500 mm); returns None for weight.
     """
     factors = takeup_factors or TAKEUP_FACTORS
     flute_clean = str(flute or "").strip().upper()
     if flute_clean not in factors:
         return None, None
 
+    if ply is None or liner_gsm is None or fluting_gsm is None or pd.isna(ply) or pd.isna(liner_gsm) or pd.isna(fluting_gsm):
+        return None, None
+    if float(ply) <= 0 or float(liner_gsm) <= 0 or float(fluting_gsm) <= 0:
+        return None, None
+    if liner_bf is not None and (pd.isna(liner_bf) or float(liner_bf) <= 0):
+        return None, None
+
     takeup = factors[flute_clean]
-
-    if pd.isna(ply) or pd.isna(liner_gsm) or pd.isna(fluting_gsm):
-        return None, None
-    if ply <= 0 or liner_gsm <= 0 or fluting_gsm <= 0:
-        return None, None
-
     comp_gsm = ((float(ply) + 1.0) / 2.0) * float(liner_gsm) + ((float(ply) - 1.0) / 2.0) * float(fluting_gsm) * takeup
 
     # Check board dimensions strictly - do NOT use silent default dimensions
@@ -72,6 +111,22 @@ def calculate_composite_weight(
     weight_kg = area_sqm * (comp_gsm / 1e3)
 
     return round(comp_gsm, 2), round(weight_kg, 4)
+
+
+def calculate_price_per_kg(
+    landed_piece_price: Optional[float],
+    item_weight_kg: Optional[float]
+) -> Tuple[Optional[float], Optional[str]]:
+    """
+    Computes effective price per kg from landed piece price and item weight.
+    Strictly excludes unresolved items where price or weight is missing, zero, or unconfirmed.
+    Returns: (price_per_kg, status_or_reason)
+    """
+    if landed_piece_price is None or pd.isna(landed_piece_price) or float(landed_piece_price) <= 0:
+        return None, "Unresolved: Landed piece price missing or invalid"
+    if item_weight_kg is None or pd.isna(item_weight_kg) or float(item_weight_kg) <= 0:
+        return None, "Unresolved: Item weight missing (cannot derive price per kg)"
+    return round(float(landed_piece_price) / float(item_weight_kg), 2), "Valid"
 
 
 def parse_uom(raw_unit: Optional[str]) -> str:

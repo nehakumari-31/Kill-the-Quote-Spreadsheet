@@ -48,3 +48,20 @@ MANDATORY_CRITERIA = {
     "Q6": {"desc": "7-Ply BCB Capability", "scope": "Line-specific", "applies_to": "7-ply / BCB"},
     "Q7": {"desc": "Moisture-Barrier Treatment", "scope": "Line-specific", "applies_to": "Moisture barrier"}
 }
+
+# Conditional Discount Configuration
+DISCOUNT_TYPES = [
+    "all_lines",
+    "spend_threshold",
+    "share_threshold",
+    "line_count_threshold",
+    "unconditional"
+]
+
+DEFAULT_CONDITIONAL_DISCOUNTS = {
+    "V1": {
+        "discount_pct": 0.05,
+        "condition_type": "all_lines",
+        "description": "5% all-lines award discount (requires 100% of RFx lines)"
+    }
+}

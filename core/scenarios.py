@@ -11,7 +11,7 @@ Calculates:
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from core.eligibility import VendorQualification, is_vendor_eligible_for_line, _extract_vendor_id
 
 
@@ -29,6 +29,199 @@ def _get_vendor_columns(df_matrix: pd.DataFrame, qualifications: Dict[str, Vendo
     # Filter or prioritize columns matching known vendors from qualifications
     matched = [c for c in candidates if _extract_vendor_id(c) in qualifications]
     return matched if matched else candidates
+
+
+def _evaluate_and_apply_scenario_discounts(
+    scenario_name: str,
+    line_allocations: List[Dict[str, Any]],
+    vendor_spends: Dict[str, float],
+    vendor_cols: List[str],
+    conditional_discounts: Optional[Dict[str, Dict[str, Any]]],
+    total_rfx_lines: int,
+    is_dual_source: bool = False
+) -> Tuple[List[Dict[str, Any]], Dict[str, float], float, Dict[str, Dict[str, Any]]]:
+    """
+    Evaluates conditional discounts independently for a given award scenario.
+    Enforces strict rules:
+    - An all-lines discount is applied ONLY when the vendor receives 100% of all required RFx lines.
+    - If the award is split across multiple vendors, or any required line is uncovered,
+      the all-lines discount is NEVER applied to any portion of that vendor's award.
+    - Recalculates vendor totals, line-level prices, line spends, and scenario spend after discount eligibility is determined.
+    - Never applies the same discount twice.
+    - Returns: (updated_allocations, updated_vendor_spends, total_scenario_spend, discounts_evaluated)
+    """
+    allocs = [dict(a) for a in line_allocations]
+    v_spends = dict(vendor_spends)
+    discounts_evaluated: Dict[str, Dict[str, Any]] = {}
+
+    if not conditional_discounts:
+        total_spend = round(float(sum(a.get("Line Spend (₹)", 0.0) for a in allocs)), 2)
+        return allocs, v_spends, total_spend, {}
+
+    total_scenario_spend = float(sum(a.get("Line Spend (₹)", 0.0) for a in allocs))
+
+    for v_key, disc_info in conditional_discounts.items():
+        matched_v = next((c for c in vendor_cols if v_key in c or _extract_vendor_id(c) == v_key), None)
+        if not matched_v:
+            continue
+
+        pct = float(disc_info.get("discount_pct", 0.0))
+        cond_type = str(disc_info.get("condition_type", "all_lines")).strip().lower()
+        desc = disc_info.get("description", "Conditional discount")
+        thresh = float(disc_info.get("threshold", 0.0))
+
+        # Check line allocations for matched_v
+        v_full_lines = 0
+        v_partial_lines = 0
+        other_awarded_vendors = set()
+        uncovered_lines = 0
+
+        for a in allocs:
+            awarded = a.get("Awarded Vendor")
+            if awarded == matched_v:
+                v_full_lines += 1
+            elif awarded == "UNCOVERED":
+                uncovered_lines += 1
+            elif awarded:
+                other_awarded_vendors.add(awarded)
+            else:
+                # Scenario C (Dual sourcing)
+                l1_v = a.get("L1 Vendor")
+                l2_v = a.get("L2 Vendor")
+                if l1_v == "UNCOVERED" or l2_v == "UNCOVERED":
+                    uncovered_lines += 1
+                elif l1_v == matched_v and l2_v in ["-", "None (Single Eligible)", None]:
+                    v_full_lines += 1
+                elif l1_v == matched_v or l2_v == matched_v:
+                    v_partial_lines += 1
+                    if l1_v and l1_v != matched_v and l1_v != "UNCOVERED":
+                        other_awarded_vendors.add(l1_v)
+                    if l2_v and l2_v != matched_v and l2_v not in ["-", "None (Single Eligible)", "UNCOVERED", None]:
+                        other_awarded_vendors.add(l2_v)
+                else:
+                    if l1_v and l1_v != "UNCOVERED":
+                        other_awarded_vendors.add(l1_v)
+                    if l2_v and l2_v not in ["-", "None (Single Eligible)", "UNCOVERED", None]:
+                        other_awarded_vendors.add(l2_v)
+
+        orig_spend = v_spends.get(matched_v, 0.0)
+
+        # Evaluate condition
+        condition_met = False
+        unmet_reason = ""
+
+        if cond_type == "all_lines":
+            if v_full_lines == total_rfx_lines and uncovered_lines == 0 and len(other_awarded_vendors) == 0 and v_partial_lines == 0:
+                condition_met = True
+            else:
+                other_names = ", ".join(sorted([_extract_vendor_id(v) for v in other_awarded_vendors])) or "other vendors"
+                if uncovered_lines > 0:
+                    unmet_reason = f"Won {v_full_lines} of {total_rfx_lines} lines ({uncovered_lines} line(s) uncovered; award not 100%). All-lines discount cannot be applied."
+                else:
+                    unmet_reason = f"Won {v_full_lines} of {total_rfx_lines} lines (Split award: remaining lines awarded to {other_names}). All-lines discount cannot be applied."
+
+        elif cond_type == "spend_threshold":
+            if orig_spend >= thresh:
+                condition_met = True
+            else:
+                unmet_reason = f"Spend ₹{orig_spend:,.2f} is below required threshold of ₹{thresh:,.2f}"
+
+        elif cond_type == "share_threshold":
+            share = (orig_spend / total_scenario_spend) if total_scenario_spend > 0 else 0.0
+            if share >= thresh:
+                condition_met = True
+            else:
+                unmet_reason = f"Spend share {share*100:.1f}% is below required threshold of {thresh*100:.1f}%"
+
+        elif cond_type == "line_count_threshold":
+            target_lines = int(thresh) if thresh > 0 else total_rfx_lines
+            if v_full_lines >= target_lines:
+                condition_met = True
+            else:
+                unmet_reason = f"Won {v_full_lines} lines below required threshold of {target_lines} lines"
+
+        elif cond_type == "unconditional":
+            condition_met = True
+
+        else:
+            unmet_reason = f"Unknown condition type '{cond_type}'"
+
+        if condition_met and pct > 0:
+            disc_amount = round(orig_spend * pct, 2)
+            for a in allocs:
+                if a.get("Awarded Vendor") == matched_v:
+                    base_p = a.get("Original Quoted Price", a.get("Landed Price (₹)", 0.0))
+                    a["Original Quoted Price"] = base_p
+                    a["Eligible Discount %"] = pct
+                    new_p = round(base_p * (1.0 - pct), 2)
+                    a["Landed Price (₹)"] = new_p
+                    a["Line Spend (₹)"] = round(new_p * a["Qty"], 2)
+                    a["Discount Status"] = f"Applied {pct*100:.1f}% discount ({desc})"
+                elif a.get("L1 Vendor") == matched_v:
+                    base_p = a.get("L1 Original Price", a.get("L1 Price", 0.0))
+                    a["L1 Original Price"] = base_p
+                    new_p = round(base_p * (1.0 - pct), 2)
+                    a["L1 Price"] = new_p
+                    p2 = a.get("L2 Price", 0.0)
+                    q1 = a.get("L1 Qty", 0.0)
+                    q2 = a.get("L2 Qty", 0.0)
+                    a["Line Spend (₹)"] = round(new_p * q1 + p2 * q2, 2)
+                elif a.get("L2 Vendor") == matched_v:
+                    base_p = a.get("L2 Original Price", a.get("L2 Price", 0.0))
+                    a["L2 Original Price"] = base_p
+                    new_p = round(base_p * (1.0 - pct), 2)
+                    a["L2 Price"] = new_p
+                    p1 = a.get("L1 Price", 0.0)
+                    q1 = a.get("L1 Qty", 0.0)
+                    q2 = a.get("L2 Qty", 0.0)
+                    a["Line Spend (₹)"] = round(p1 * q1 + new_p * q2, 2)
+
+            v_recalc = 0.0
+            for a in allocs:
+                if a.get("Awarded Vendor") == matched_v:
+                    v_recalc += a["Line Spend (₹)"]
+                elif a.get("L1 Vendor") == matched_v:
+                    v_recalc += a["L1 Price"] * a.get("L1 Qty", 0.0)
+                elif a.get("L2 Vendor") == matched_v:
+                    v_recalc += a["L2 Price"] * a.get("L2 Qty", 0.0)
+
+            v_spends[matched_v] = round(v_recalc, 2)
+            final_award = v_spends[matched_v]
+
+            discounts_evaluated[matched_v] = {
+                "vendor": matched_v,
+                "vendor_id": _extract_vendor_id(matched_v),
+                "condition_type": cond_type,
+                "description": desc,
+                "original_amount": orig_spend,
+                "eligible_discount": f"{pct*100:.1f}%",
+                "discount_pct": pct,
+                "discount_amount": disc_amount,
+                "discount_applied": disc_amount,
+                "discount_not_applied_reason": None,
+                "final_award_amount": final_award,
+                "applied": True,
+                "status": f"Applied {pct*100:.1f}% discount ({desc})"
+            }
+        else:
+            discounts_evaluated[matched_v] = {
+                "vendor": matched_v,
+                "vendor_id": _extract_vendor_id(matched_v),
+                "condition_type": cond_type,
+                "description": desc,
+                "original_amount": orig_spend,
+                "eligible_discount": f"{pct*100:.1f}%",
+                "discount_pct": pct,
+                "discount_amount": 0.0,
+                "discount_applied": 0.0,
+                "discount_not_applied_reason": unmet_reason,
+                "final_award_amount": orig_spend,
+                "applied": False,
+                "status": f"NOT applied: {unmet_reason}"
+            }
+
+    recalc_scenario_spend = round(float(sum(a.get("Line Spend (₹)", 0.0) for a in allocs)), 2)
+    return allocs, v_spends, recalc_scenario_spend, discounts_evaluated
 
 
 def calculate_award_scenarios(
@@ -60,9 +253,46 @@ def calculate_award_scenarios(
     budget_spend = float((df["Budget Price"] * df["Est. Qty"]).sum())
 
     # 1. SCENARIO A: Unconstrained L1
+    has_valid_quotes = df[vendor_cols].notna().any(axis=1)
     df["L1_Price_A"] = df[vendor_cols].min(axis=1, skipna=True)
-    df["L1_Vendor_A"] = df[vendor_cols].idxmin(axis=1, skipna=True)
-    spend_a = float((df["L1_Price_A"] * df["Est. Qty"]).sum())
+    df["L1_Vendor_A"] = pd.Series(index=df.index, dtype=object)
+    if has_valid_quotes.any():
+        df.loc[has_valid_quotes, "L1_Vendor_A"] = df.loc[has_valid_quotes, vendor_cols].idxmin(axis=1, skipna=True)
+
+    a_line_allocations = []
+    a_vendor_spends = {v: 0.0 for v in vendor_cols}
+    for _, row in df.iterrows():
+        l_no = int(row["Line #"])
+        item_code = str(row["Item Code"])
+        desc = str(row.get("Description", ""))
+        qty = float(row["Est. Qty"])
+        best_v = row["L1_Vendor_A"]
+        best_p = row["L1_Price_A"]
+        if pd.notna(best_v) and pd.notna(best_p):
+            line_spend = float(best_p * qty)
+            a_vendor_spends[best_v] += line_spend
+            a_line_allocations.append({
+                "Line #": l_no,
+                "Item Code": item_code,
+                "Description": desc,
+                "Awarded Vendor": best_v,
+                "Landed Price (₹)": float(best_p),
+                "Qty": qty,
+                "Line Spend (₹)": line_spend,
+                "Status": "Awarded"
+            })
+        else:
+            budget_p = float(row["Budget Price"])
+            a_line_allocations.append({
+                "Line #": l_no,
+                "Item Code": item_code,
+                "Description": desc,
+                "Awarded Vendor": "UNCOVERED",
+                "Landed Price (₹)": budget_p,
+                "Qty": qty,
+                "Line Spend (₹)": float(budget_p * qty),
+                "Status": "UNCOVERED"
+            })
 
     # 2. SCENARIO B: Quality-Gated L1
     # 3. SCENARIO C: Quality-Gated + Dual Sourcing (70/30 on Criticality A)
@@ -263,66 +493,38 @@ def calculate_award_scenarios(
                     risks_b.append(f"Supplier share cap ({max_single_vendor_share*100:.0f}%) reached constraint limit for {target_v}: no further alternate eligible quotes available.")
                     break
 
-    spend_b = float(sum(item["Line Spend (₹)"] for item in b_line_allocations))
-    spend_c = float(sum(item["Line Spend (₹)"] for item in c_line_allocations))
+    total_rfx_lines = len(df)
 
-    # EVALUATE CONDITIONAL DISCOUNTS (APPLIED ONLY WHEN CONDITIONS SATISFIED)
-    discounts_evaluated = {}
-    if conditional_discounts:
-        total_covered_lines_b = len([a for a in b_line_allocations if a["Awarded Vendor"] != "UNCOVERED"])
-        for v_key, disc_info in conditional_discounts.items():
-            # Match vendor column
-            matched_v = next((c for c in vendor_cols if v_key in c or _extract_vendor_id(c) == v_key), None)
-            if not matched_v:
-                continue
+    # EVALUATE CONDITIONAL DISCOUNTS INDEPENDENTLY FOR SCENARIO A, SCENARIO B, AND SCENARIO C
+    a_line_allocations, a_vendor_spends, spend_a, discounts_evaluated_a = _evaluate_and_apply_scenario_discounts(
+        scenario_name="Scenario A",
+        line_allocations=a_line_allocations,
+        vendor_spends=a_vendor_spends,
+        vendor_cols=vendor_cols,
+        conditional_discounts=conditional_discounts,
+        total_rfx_lines=total_rfx_lines,
+        is_dual_source=False
+    )
 
-            pct = float(disc_info.get("discount_pct", 0.0))
-            cond_type = str(disc_info.get("condition_type", "all_lines")).lower()
-            desc = disc_info.get("description", "Conditional discount")
-            thresh = float(disc_info.get("threshold", 0.0))
+    b_line_allocations, b_vendor_spends, spend_b, discounts_evaluated_b = _evaluate_and_apply_scenario_discounts(
+        scenario_name="Scenario B",
+        line_allocations=b_line_allocations,
+        vendor_spends=b_vendor_spends,
+        vendor_cols=vendor_cols,
+        conditional_discounts=conditional_discounts,
+        total_rfx_lines=total_rfx_lines,
+        is_dual_source=False
+    )
 
-            v_lines_won = len([a for a in b_line_allocations if a["Awarded Vendor"] == matched_v])
-            v_curr_spend = b_vendor_spends.get(matched_v, 0.0)
-
-            # Evaluate condition
-            condition_met = False
-            unmet_reason = ""
-            if cond_type == "all_lines":
-                if v_lines_won == total_covered_lines_b and total_covered_lines_b > 0:
-                    condition_met = True
-                else:
-                    unmet_reason = f"Won {v_lines_won} of {total_covered_lines_b} lines (Split award)"
-            elif cond_type == "spend_threshold":
-                if v_curr_spend >= thresh:
-                    condition_met = True
-                else:
-                    unmet_reason = f"Spend ₹{v_curr_spend:,.0f} below ₹{thresh:,.0f} threshold"
-            elif cond_type == "share_threshold":
-                share = (v_curr_spend / spend_b) if spend_b > 0 else 0.0
-                if share >= thresh:
-                    condition_met = True
-                else:
-                    unmet_reason = f"Share {share*100:.1f}% below {thresh*100:.1f}% threshold"
-
-            if condition_met and pct > 0:
-                disc_amount = v_curr_spend * pct
-                b_vendor_spends[matched_v] -= disc_amount
-                spend_b -= disc_amount
-                discounts_evaluated[matched_v] = {
-                    "applied": True,
-                    "discount_pct": pct,
-                    "discount_amount": disc_amount,
-                    "description": desc,
-                    "status": f"Applied {pct*100:.1f}% discount ({desc})"
-                }
-            else:
-                discounts_evaluated[matched_v] = {
-                    "applied": False,
-                    "discount_pct": pct,
-                    "discount_amount": 0.0,
-                    "description": desc,
-                    "status": f"NOT applied: {unmet_reason}"
-                }
+    c_line_allocations, c_vendor_spends, spend_c, discounts_evaluated_c = _evaluate_and_apply_scenario_discounts(
+        scenario_name="Scenario C",
+        line_allocations=c_line_allocations,
+        vendor_spends=c_vendor_spends,
+        vendor_cols=vendor_cols,
+        conditional_discounts=conditional_discounts,
+        total_rfx_lines=total_rfx_lines,
+        is_dual_source=True
+    )
 
     savings_a = budget_spend - spend_a
     savings_b = budget_spend - spend_b
@@ -334,6 +536,15 @@ def calculate_award_scenarios(
 
     cost_of_compliance = spend_b - spend_a
     compliance_pct = (cost_of_compliance / spend_a) * 100.0 if spend_a > 0 else 0.0
+
+    # Vendor spend shares for Scenario A
+    vendor_shares_a = {}
+    for v, s in a_vendor_spends.items():
+        if spend_a > 0 and s > 0:
+            vendor_shares_a[v] = {
+                "spend": s,
+                "share_pct": (s / spend_a) * 100.0
+            }
 
     # Vendor spend shares for Scenario B
     vendor_shares_b = {}
@@ -368,12 +579,17 @@ def calculate_award_scenarios(
         "compliance_pct": compliance_pct,
         "uncovered_lines_b": uncovered_lines_b,
         "uncovered_lines_c": uncovered_lines_c,
+        "a_line_allocations": a_line_allocations,
         "b_line_allocations": b_line_allocations,
         "c_line_allocations": c_line_allocations,
+        "vendor_shares_a": vendor_shares_a,
         "vendor_shares_b": vendor_shares_b,
         "vendor_shares_c": vendor_shares_c,
         "risks_b": risks_b,
         "risks_c": risks_c,
-        "discounts_evaluated": discounts_evaluated,
+        "discounts_evaluated": discounts_evaluated_b,
+        "discounts_evaluated_a": discounts_evaluated_a,
+        "discounts_evaluated_b": discounts_evaluated_b,
+        "discounts_evaluated_c": discounts_evaluated_c,
         "max_supplier_share_enforced": max_single_vendor_share
     }
