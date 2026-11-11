@@ -250,12 +250,12 @@ def _read_raw_text(file_bytes: bytes, filename: str) -> str:
 
 
 def _parse_excel_file(file_bytes: bytes, filename: str, meta: QuotationMetadata):
-    """Parses Excel quote sheets."""
+    """Parses Excel quote sheets deterministically preserving full audit traceability."""
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
     sheet_names = wb.sheetnames
     sheet = wb[sheet_names[0]]
 
-    # Detect vendor
+    # Detect vendor and metadata from top rows
     vendor_found = None
     for r in range(1, min(10, sheet.max_row + 1)):
         row_text = " ".join([str(sheet.cell(r, c).value or "") for c in range(1, min(10, sheet.max_column + 1))])
@@ -275,16 +275,28 @@ def _parse_excel_file(file_bytes: bytes, filename: str, meta: QuotationMetadata)
         if any("line" in v or "item" in v or "sku" in v for v in vals):
             hdr_row = r
             for c_idx, val in enumerate(vals, start=1):
+                if not val:
+                    continue
                 if "line" in val:
                     col_map["line"] = c_idx
                 elif "code" in val or "sku" in val:
                     col_map["code"] = c_idx
-                elif "price" in val or "rate" in val or "quote" in val:
-                    col_map["price"] = c_idx
+                elif "desc" in val:
+                    col_map["desc"] = c_idx
                 elif "uom" in val or "unit" in val:
                     col_map["uom"] = c_idx
+                elif "price" in val or "rate" in val or (val.startswith("quote") and "uom" not in val):
+                    col_map["price"] = c_idx
                 elif "note" in val or "remark" in val:
                     col_map["notes"] = c_idx
+                elif "curr" in val:
+                    col_map["curr"] = c_idx
+                elif "gst" in val or "tax" in val:
+                    col_map["gst"] = c_idx
+                elif "lead" in val:
+                    col_map["lead"] = c_idx
+                elif "pay" in val:
+                    col_map["pay"] = c_idx
             break
 
     # Read rows
@@ -297,18 +309,26 @@ def _parse_excel_file(file_bytes: bytes, filename: str, meta: QuotationMetadata)
         price_cell = sheet.cell(r, col_map.get("price", 4)).value
         uom_cell = str(sheet.cell(r, col_map.get("uom", 5)).value or "Nos").strip()
         notes_cell = str(sheet.cell(r, col_map.get("notes", 11)).value or "").strip()
+        pay_cell = str(sheet.cell(r, col_map.get("pay", 10)).value or "").strip() if "pay" in col_map else ""
+        gst_cell = str(sheet.cell(r, col_map.get("gst", 8)).value or "").strip() if "gst" in col_map else ""
+
+        if pay_cell and not meta.payment_terms:
+            meta.payment_terms = pay_cell
+        if gst_cell and not meta.gst_terms:
+            meta.gst_terms = gst_cell
 
         raw_str = f"{price_cell} {uom_cell} ({notes_cell})".strip()
         p_val = _clean_float(price_cell)
-        status = "Verified" if p_val is not None else "Needs Review"
-        conf = 0.95 if p_val is not None else 0.50
+        is_missing = p_val is None or any(k in str(price_cell).lower() for k in ["not quoted", "nil", "n/a", "-"])
+        status = "Verified" if not is_missing else "Missing"
+        conf = 0.95 if not is_missing else 0.0
 
         meta.fields.append(ExtractedField(
             line_item=line_no,
             item_code=code_val,
-            price=p_val,
+            price=p_val if not is_missing else None,
             unit=uom_cell,
-            currency="INR",
+            currency=meta.currency or "INR",
             source_reference=f"Sheet '{sheet.title}', Row {r}, Cell {openpyxl.utils.get_column_letter(col_map.get('price', 4))}{r}",
             confidence_score=conf,
             extraction_status=status,
@@ -357,7 +377,7 @@ def _parse_docx_file(file_bytes: bytes, filename: str, meta: QuotationMetadata):
 
 
 def _parse_pdf_file(file_bytes: bytes, filename: str, meta: QuotationMetadata):
-    """Parses PDF documents using PyMuPDF or pypdf."""
+    """Parses PDF documents using PyMuPDF or pypdf deterministically."""
     text_lines = []
     if HAS_FITZ:
         doc = fitz.open(stream=file_bytes, filetype="pdf")
@@ -378,24 +398,79 @@ def _parse_pdf_file(file_bytes: bytes, filename: str, meta: QuotationMetadata):
     meta.vendor_id = _detect_vendor_from_text(all_text) or _infer_vendor_id(filename, filename)
     meta.vendor_name = _vendor_id_to_name(meta.vendor_id)
 
-    # Search for CP line patterns: e.g. "1 CP-001 ... Rs 6.38" or "1 | CP-001 | 6.38"
+    # Extract header metadata if present
+    ref_m = re.search(r"Ref:\s*([^\n|]+)", all_text, re.IGNORECASE)
+    if ref_m:
+        meta.quote_ref = ref_m.group(1).strip()
+    date_m = re.search(r"Date:\s*([^\n|]+)", all_text, re.IGNORECASE)
+    if date_m:
+        meta.quote_date = date_m.group(1).strip()
+    terms_m = re.search(r"Terms:\s*([^\n|]+)", all_text, re.IGNORECASE)
+    if terms_m:
+        meta.payment_terms = terms_m.group(1).strip()
+    freight_m = re.search(r"Freight:\s*([^\n|]+)", all_text, re.IGNORECASE)
+    if freight_m:
+        meta.freight_terms = freight_m.group(1).strip()
+    gst_m = re.search(r"GST:\s*([^\n|]+)", all_text, re.IGNORECASE)
+    if gst_m:
+        meta.gst_terms = gst_m.group(1).strip()
+
+    # Pattern A: Single-line regex (e.g. pypdf) "1 CP-001 ... Rs 6.38"
+    single_line_matches = []
     for p_no, l_text in text_lines:
         m = re.match(r"^(\d{1,2})\s+(CP-\d{3})\b.*?([₹Rs\$\s]*\d+\.?\d*)", l_text)
         if m:
-            line_no = int(m.group(1))
-            code_val = m.group(2)
-            p_val = _clean_float(m.group(3))
+            single_line_matches.append((p_no, int(m.group(1)), m.group(2), _clean_float(m.group(3)), "Nos", l_text))
+
+    if len(single_line_matches) >= 15:
+        for p_no, line_no, code_val, p_val, uom, l_text in single_line_matches:
             meta.fields.append(ExtractedField(
                 line_item=line_no,
                 item_code=code_val,
                 price=p_val,
-                unit="Nos",
+                unit=uom,
                 currency="INR",
                 source_reference=f"Page {p_no}, Line snippet: '{l_text[:35]}'",
                 confidence_score=0.92,
                 extraction_status="Verified" if p_val else "Needs Review",
                 original_raw_text=l_text
             ))
+        return
+
+    # Pattern B: Sequential token matching (PyMuPDF fitz cell-by-cell extraction)
+    tokens = [t[1] for t in text_lines]
+    pages = [t[0] for t in text_lines]
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.isdigit() and 1 <= int(tok) <= 30 and i + 1 < len(tokens) and re.match(r"^CP-\d{3}$", tokens[i+1]):
+            line_no = int(tok)
+            code_val = tokens[i+1]
+            desc_val = tokens[i+2] if i + 2 < len(tokens) else ""
+            uom_val = tokens[i+3] if i + 3 < len(tokens) else "Nos"
+            rate_raw = tokens[i+4] if i + 4 < len(tokens) else ""
+            delivery_val = tokens[i+5] if i + 5 < len(tokens) else ""
+            p_no = pages[i]
+
+            p_val = _clean_float(rate_raw)
+            status = "Verified" if p_val is not None else "Needs Review"
+            raw_evidence = f"{tok} | {code_val} | {desc_val} | {uom_val} | {rate_raw} | {delivery_val}"
+
+            meta.fields.append(ExtractedField(
+                line_item=line_no,
+                item_code=code_val,
+                price=p_val,
+                unit=uom_val,
+                currency="INR",
+                source_reference=f"Page {p_no}, Table Row for Line {line_no}",
+                confidence_score=0.95 if p_val is not None else 0.5,
+                extraction_status=status,
+                original_raw_text=raw_evidence,
+                notes=f"Delivery to {delivery_val}" if delivery_val else None
+            ))
+            i += 6
+        else:
+            i += 1
 
 
 def _parse_eml_file(file_bytes: bytes, filename: str, meta: QuotationMetadata):
@@ -489,22 +564,26 @@ def _parse_eml_file(file_bytes: bytes, filename: str, meta: QuotationMetadata):
 
 
 def _parse_image_fallback(file_bytes: bytes, filename: str, meta: QuotationMetadata):
-    """Fallback when image is uploaded without an active LLM API key."""
+    """
+    Fallback when image is uploaded without an active vision-capable model.
+    Does NOT create fake OCR numbers or filename-based mocks.
+    Explicitly marks all items as Pending Vision OCR and Needs Review.
+    """
     meta.vendor_id = _infer_vendor_id(filename, filename)
     meta.vendor_name = _vendor_id_to_name(meta.vendor_id)
-    meta.extraction_mode = "Image Parser (Requires API Key for full Vision OCR)"
-    # Flag to user that image parsing is pending LLM Vision
+    meta.extraction_mode = "DEMO / PENDING VISION OCR (Requires OpenAI API Key for Vision OCR)"
     for l_no in range(1, 31):
         meta.fields.append(ExtractedField(
             line_item=l_no,
             item_code=f"CP-{l_no:03d}",
             price=None,
-            unit="Pending Vision",
+            unit="Pending Vision OCR",
             currency="INR",
             source_reference=f"Scanned image: {filename}",
-            confidence_score=0.5,
+            confidence_score=0.0,
             extraction_status="Needs Review",
-            original_raw_text="Image document uploaded; requires OpenAI API Key in sidebar for Vision OCR."
+            original_raw_text="DEMO / PENDING OCR: Scanned document requires Vision-capable model for genuine OCR extraction.",
+            notes="Requires Vision OCR"
         ))
 
 

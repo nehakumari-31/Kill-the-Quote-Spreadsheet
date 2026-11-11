@@ -159,13 +159,24 @@ st.markdown("""
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. DETERMINISTIC NORMALIZATION CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
-FX_RATE = 84.50  # USD to INR
-
-FREIGHT_RATES = {
-    "Pune (Chakan plant)": 1.20,
-    "Bhiwandi DC": 2.20,
-    "Bengaluru (Peenya plant)": 4.50
-}  # in ₹/kg
+from core.config import (
+    TAKEUP_FACTORS,
+    DEFAULT_FX_RATE as FX_RATE,
+    DEFAULT_FX_EFFECTIVE_DATE,
+    DEFAULT_FREIGHT_RATES as FREIGHT_RATES
+)
+from core.normalizer import (
+    calculate_composite_weight,
+    normalize_price,
+    parse_uom
+)
+from core.eligibility import (
+    evaluate_vendor_qualifications,
+    is_vendor_eligible_for_line
+)
+from core.scenarios import calculate_award_scenarios
+from core.extractor import extract_vendor_quote_file
+from core.models import QuotationMetadata, ExtractedField
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -242,7 +253,6 @@ def initialize_database():
     df_gate = pd.read_excel(xl, sheet_name="Questionnaire Audit & Gate")
 
     # 4. Deterministic composite weight calculator (kg/UoM)
-    takeups = {'B': 1.32, 'C': 1.43, 'E': 1.25, 'BC': 1.38, 'BCB': 1.36}
     weights = {}
     for _, r in df_items.iterrows():
         l_no = int(r["Line #"])
@@ -250,15 +260,21 @@ def initialize_database():
         flute = str(r.get("Flute", "B")).strip()
         liner_gsm = float(r.get("Liner GSM (each)", 150))
         fluting_gsm = float(r.get("Fluting GSM (each)", 120))
-        takeup = takeups.get(flute, 1.32)
-        comp_gsm = ((ply + 1) / 2) * liner_gsm + ((ply - 1) / 2) * fluting_gsm * takeup
-        bl = float(r.get("Board size L (mm)", 1000)) if pd.notna(r.get("Board size L (mm)")) else 1000.0
-        bw = float(r.get("Board size W (mm)", 500)) if pd.notna(r.get("Board size W (mm)")) else 500.0
-        wt = (bl * bw / 1e6) * (comp_gsm / 1e3)
-        weights[l_no] = round(wt, 3)
+        bl = float(r.get("Board size L (mm)", 0)) if pd.notna(r.get("Board size L (mm)")) else None
+        bw = float(r.get("Board size W (mm)", 0)) if pd.notna(r.get("Board size W (mm)")) else None
+        _, wt = calculate_composite_weight(
+            ply=ply,
+            flute=flute,
+            liner_gsm=liner_gsm,
+            fluting_gsm=fluting_gsm,
+            board_l_mm=bl,
+            board_w_mm=bw
+        )
+        weights[l_no] = round(wt, 4) if wt is not None else None
 
     st.session_state.item_weights = weights
     st.session_state.df_gate = df_gate
+    st.session_state.df_items = df_items
 
     # 5. Build Initial Normalized Matrix with Source Citations
     hist_dict = df_hist.set_index("Line #").to_dict(orient="index")
@@ -276,8 +292,8 @@ def initialize_database():
         h_info = hist_dict.get(l_no, {})
         po_price = h_info.get("FY25 PO Unit Price (₹)")
         is_new_sku = (h_info.get("SKU Classification") == "New SKU") or pd.isna(po_price)
-        wt = weights.get(l_no, 0.25)
-        freight = FREIGHT_RATES.get(loc, 1.20)
+        wt = weights.get(l_no)
+        freight = FREIGHT_RATES.get(loc)
 
         # Baseline Vendor Quotes & Citations
         # V1: Lines 1 & 2 quoted /1,000; others standard
@@ -385,87 +401,116 @@ def format_openai_api_error(e: Exception) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. LIVE EXTRACTION PIPELINE (VISION OCR & MULTI-FORMAT LLM EXTRACTION)
+# 5. LIVE EXTRACTION PIPELINE (VISION OCR & MULTI-FORMAT EXTRACTION)
 # ─────────────────────────────────────────────────────────────────────────────
-def extract_vendor_quote(file, client):
+def extract_vendor_quote(file, client=None):
     """
-    Live extraction function. For images (jpg, png), executes Vision OCR via Base64.
-    For documents (pdf, docx, xlsx, eml), extracts text and passes to LLM.
-    Strict JSON output: [{"line_item": int, "price": float, "unit": str, "source_citation": "exact text from doc"}]
-    NO HARDCODED FALLBACK DICTIONARIES.
+    Live extraction dispatcher using the unified pipeline in core.extractor.
+    Returns list of dicts for backward compatibility while preserving full metadata.
     """
-    filename = file.name
-    name_lower = filename.lower()
-    bytes_data = file.getvalue()
+    filename = getattr(file, "name", "quote_file")
+    bytes_data = file.getvalue() if hasattr(file, "getvalue") else (file.read() if hasattr(file, "read") else file)
+    meta = extract_vendor_quote_file(bytes_data, filename, openai_client=client)
+    res = []
+    for f in meta.fields:
+        res.append({
+            "line_item": f.line_item,
+            "item_code": f.item_code,
+            "price": f.price,
+            "unit": f.unit,
+            "currency": f.currency,
+            "source_citation": f.source_reference,
+            "extraction_status": f.extraction_status,
+            "confidence_score": f.confidence_score,
+            "original_raw_text": f.original_raw_text,
+            "notes": f.notes
+        })
+    return res
 
-    system_prompt = """You are a specialized Procurement Document Extraction AI.
-Extract quotation line items from the provided document into a JSON object with key "quotes" containing an array of objects.
-Strict JSON schema per object:
-- line_item: integer (1 to 30 corresponding to the RFx packaging line item number, or infer from item code CP-001 = 1, CP-002 = 2, etc.)
-- price: float or null (numeric quote, or null if stated as 'Same as last year' or missing)
-- unit: string (e.g., 'Nos', '₹/kg', '/1000 Nos', 'USD', 'Same as last year', 'NOT QUOTED')
-- source_citation: string (CRITICAL: exact verbatim text snippet from the document proving this price and unit, e.g., '₹38.00/kg board rate + freight' or 'USD $0.0708 /Nos (FOB Shanghai)')
 
-Respond ONLY with valid JSON."""
+def integrate_quotation_into_df_norm(meta: QuotationMetadata, target_vendor: Optional[str] = None) -> int:
+    """
+    Deterministically normalizes and merges extracted QuotationMetadata fields into st.session_state.df_norm.
+    Preserves exact formulas, source citations, trust flags, and unresolved statuses.
+    """
+    col_mapping = {
+        "V1": "V1 (Apex)",
+        "V2": "V2 (PackTech)",
+        "V3": "V3 (Global USD)",
+        "V4": "V4 (Balaji)",
+        "V5": "V5 (Standard Box)"
+    }
+    vendor_col = target_vendor
+    if not vendor_col or vendor_col == "Auto-Detect from Document":
+        vendor_col = col_mapping.get(meta.vendor_id, "V1 (Apex)")
+    
+    if vendor_col not in st.session_state.df_norm.columns:
+        vendor_col = col_mapping.get(meta.vendor_id, "V1 (Apex)")
 
-    # 1. Vision OCR for Images (jpg, png)
-    if name_lower.endswith(".jpg") or name_lower.endswith(".jpeg") or name_lower.endswith(".png"):
-        b64_image = base64.b64encode(bytes_data).decode("utf-8")
-        mime = "image/png" if name_lower.endswith(".png") else "image/jpeg"
+    cite_col = f"{vendor_col.split()[0]} Citation"
+    count = 0
+
+    for f in meta.fields:
+        l_item = f.line_item
+        if not l_item or l_item not in st.session_state.df_norm["Line #"].values:
+            continue
         
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": f"Extract all packaging quotation line items from this quotation document image: {filename}"},
-                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64_image}"}}
-                    ]
-                }
-            ],
-            temperature=0.0
-        )
-        return json.loads(response.choices[0].message.content).get("quotes", [])
+        row_idx = st.session_state.df_norm["Line #"] == l_item
+        d_loc = st.session_state.df_norm.loc[row_idx, "Delivery Location"].values[0]
+        c_wt = st.session_state.df_norm.loc[row_idx, "Est. Wt (kg)"].values[0]
+        is_new = l_item in [25, 27, 28, 29, 30]
 
-    # 2. Text extraction for documents
-    raw_doc_text = ""
-    if name_lower.endswith(".xlsx") or name_lower.endswith(".xls"):
-        sheets = pd.read_excel(io.BytesIO(bytes_data), sheet_name=None)
-        raw_doc_text = "\n".join([f"Sheet {k}:\n{v.to_string()}" for k, v in sheets.items()])
+        # Case 1: Demo / Pending Vision OCR
+        if f.extraction_status == "Needs Review" and f.unit == "Pending Vision OCR":
+            landed = np.nan
+            flag = "DEMO DATA (Pending Vision OCR)"
+            cite = f"{f.source_reference} -> Requires Vision OCR"
+        # Case 2: Omitted / Not Quoted
+        elif f.extraction_status == "Missing" or (f.price is None and f.unit not in ["Same as last year", "₹/kg"]):
+            landed = np.nan
+            flag = "Missing / Omitted"
+            cite = f"{f.source_reference}: {f.notes or f.original_raw_text or 'NOT QUOTED'}"
+        # Case 3: "Same as last year"
+        elif f.unit == "Same as last year" or "same as last year" in str(f.original_raw_text).lower():
+            if is_new:
+                landed = np.nan
+                flag = "UNRESOLVED"
+                cite = f"{f.source_reference} -> Stated 'Same as last year' on New SKU with no PO history -> UNRESOLVED"
+            else:
+                landed, flag, cite = normalize_extracted_quote("Same as last year", l_item, d_loc, c_wt, is_new)
+                cite = f"{f.source_reference} -> {cite}"
+        # Case 4: Disqualified line
+        elif f.notes and "Failed Gate" in f.notes:
+            landed = np.nan
+            flag = f"Disqualified ({f.notes})"
+            cite = f"{f.source_reference} -> {f.notes}"
+        # Case 5: Normal deterministic quote
+        else:
+            freight_inc = ("packtech" in meta.vendor_name.lower()) or ("global" in meta.vendor_name.lower())
+            norm_res = normalize_price(
+                raw_value=f.price,
+                raw_unit=f.unit,
+                raw_currency=f.currency or meta.currency,
+                line_no=l_item,
+                delivery_location=d_loc,
+                item_weight_kg=c_wt,
+                is_new_sku=is_new,
+                fx_rate=FX_RATE,
+                freight_rates=FREIGHT_RATES,
+                freight_included=freight_inc
+            )
+            landed = norm_res.normalized_price if norm_res.normalized_price is not None else np.nan
+            flag = norm_res.trust_flag
+            cite = f"{f.source_reference} -> {norm_res.formula_citation}"
 
-    elif name_lower.endswith(".docx") and HAS_DOCX:
-        doc = docx.Document(io.BytesIO(bytes_data))
-        raw_doc_text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-        for tbl in doc.tables:
-            for row in tbl.rows:
-                raw_doc_text += "\n" + " | ".join([c.text.strip() for c in row.cells])
+        st.session_state.df_norm.loc[row_idx, vendor_col] = landed
+        if cite_col in st.session_state.df_norm.columns:
+            st.session_state.df_norm.loc[row_idx, cite_col] = cite
+        if vendor_col == "V5 (Standard Box)":
+            st.session_state.df_norm.loc[row_idx, "V5 Trust Flag"] = flag
+        count += 1
 
-    elif name_lower.endswith(".pdf") and HAS_PYPDF:
-        reader = PdfReader(io.BytesIO(bytes_data))
-        raw_doc_text = "\n".join([page.extract_text() or "" for page in reader.pages])
-
-    elif name_lower.endswith(".eml"):
-        msg = BytesParser(policy=policy.default).parsebytes(bytes_data)
-        body = msg.get_body(preferencelist=('plain', 'html'))
-        raw_doc_text = f"Subject: {msg['subject']}\nFrom: {msg['from']}\n\n{body.get_content() if body else ''}"
-
-    else:
-        raw_doc_text = bytes_data.decode("utf-8", errors="ignore")
-
-    # Call LLM for text documents
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Document Filename: {filename}\n\nContent:\n{raw_doc_text[:12000]}"}
-        ],
-        temperature=0.0
-    )
-    return json.loads(response.choices[0].message.content).get("quotes", [])
+    return count
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -473,58 +518,28 @@ Respond ONLY with valid JSON."""
 # ─────────────────────────────────────────────────────────────────────────────
 def normalize_extracted_quote(raw_price_str, line_no, delivery_loc, item_wt, is_new_sku, last_po_price=None):
     """
-    Deterministic normalization engine.
-    - If unit is '₹/kg': (extracted_price + freight_rate) * composite_weight
-    - If unit is '/1000': extracted_price / 1000.0
-    - If unit is 'USD': extracted_price * FX_RATE (84.50)
-    - If 'Same as last year' and New SKU -> pd.NA, Trust Flag = 'UNRESOLVED'
+    Deterministic normalization delegating to the single source of truth in core.normalizer.
+    Returns (landed_val, trust_flag, formula_citation)
     """
-    if pd.isna(raw_price_str) or raw_price_str is None:
-        return np.nan, "Missing / Not Quoted", "Quote omitted"
-
-    s = str(raw_price_str).strip().lower()
-
-    if not s or any(k in s for k in ["unresolved", "not quoted", "missing", "nan", "none"]):
-        return np.nan, "UNRESOLVED", "Unresolved quote"
-
-    # Historical PO check
-    if "same as last year" in s or "historical" in s:
-        if is_new_sku or pd.isna(last_po_price) or float(last_po_price or 0) <= 0:
-            return np.nan, "UNRESOLVED", "Quoted 'Same as last year', but item is a New SKU with no PO history -> UNRESOLVED"
-        else:
-            landed = round(float(last_po_price) * 1.036, 2)
-            return landed, "Inferred (PO History)", f"Resolved from FY25 PO (₹{float(last_po_price):.2f}) + 3.6% index"
-
-    # Extract numeric value
-    match = re.search(r"[-+]?(?:\d*\.\d+|\d+)", s.replace(",", ""))
-    if not match:
-        return np.nan, "UNRESOLVED", f"Unparseable price: '{raw_price_str}'"
-
-    numeric_val = float(match.group(0))
-    freight = FREIGHT_RATES.get(delivery_loc, 1.20)
-
-    # Unit Conversion: ₹/kg
-    if "kg" in s or "per kg" in s:
-        wt = float(item_wt) if (pd.notna(item_wt) and item_wt > 0) else 0.25
-        # Strict formula: (extracted_price + freight_rate) * composite_weight
-        landed = round((numeric_val + freight) * wt, 2)
-        citation = f"(₹{numeric_val:.2f}/kg + ₹{freight:.2f} freight) × {wt:.3f}kg = ₹{landed:.2f}"
-        return landed, "Inferred (kg to piece)", citation
-
-    # Unit Conversion: Per 1,000 units
-    if "1000" in s or "/1,000" in s:
-        landed = round(numeric_val / 1000.0, 2)
-        citation = f"₹{numeric_val:,.2f} per 1,000 Nos ÷ 1000 = ₹{landed:.2f}"
-        return landed, "Inferred (/1000 to piece)", citation
-
-    # FX Conversion: USD to INR
-    if "usd" in s or "$" in s:
-        landed = round(numeric_val * FX_RATE, 2)
-        citation = f"USD ${numeric_val:.4f} × ₹{FX_RATE:.2f}/USD = ₹{landed:.2f}"
-        return landed, "Inferred (USD to INR)", citation
-
-    # Standard direct piece rate
-    return round(numeric_val, 2), "Verified", f"₹{numeric_val:.2f} direct piece quote"
+    res = normalize_price(
+        raw_value=raw_price_str,
+        raw_unit=None,
+        raw_currency="INR",
+        line_no=line_no,
+        delivery_location=delivery_loc,
+        item_weight_kg=item_wt,
+        is_new_sku=is_new_sku,
+        last_po_price=last_po_price,
+        fx_rate=FX_RATE,
+        freight_rates=FREIGHT_RATES,
+        freight_included=False
+    )
+    landed_val = res.normalized_price if res.normalized_price is not None else np.nan
+    trust_flag = res.trust_flag
+    cite = res.formula_citation
+    if res.status == "Unresolved" and res.missing_inputs:
+        cite = f"{cite} [Missing: {', '.join(res.missing_inputs)}]"
+    return landed_val, trust_flag, cite
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -532,73 +547,19 @@ def normalize_extracted_quote(raw_price_str, line_no, delivery_loc, item_wt, is_
 # ─────────────────────────────────────────────────────────────────────────────
 def calculate_live_scenarios(df_current):
     """
-    Computes Scenarios A, B, and C dynamically using vectorized Pandas logic.
-    Directly bound to st.data_editor state.
+    Computes Scenarios A, B, and C dynamically by consuming the single source of truth
+    qualification evaluation engine (core.scenarios.calculate_award_scenarios) rather
+    than reimplementing hardcoded vendor exclusions or line numbers.
     """
-    df = df_current.copy()
-    vendor_cols_all = ["V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)"]
+    df_gate = st.session_state.get("df_gate")
+    df_items = st.session_state.get("df_items")
 
-    for c in vendor_cols_all:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df["Est. Qty"] = pd.to_numeric(df["Est. Qty"], errors="coerce").fillna(0)
-    df["Budget Price"] = pd.to_numeric(df["Budget Price"], errors="coerce").fillna(0)
+    if df_gate is not None and df_items is not None:
+        quals = evaluate_vendor_qualifications(df_gate, df_items)
+    else:
+        quals = {}
 
-    # ── Scenario A (Unconstrained): min(axis=1) across all 5 vendors * Qty ──
-    df["L1_A"] = df[vendor_cols_all].min(axis=1, skipna=True)
-    spend_a = float((df["L1_A"] * df["Est. Qty"]).sum())
-
-    # ── Scenario B (Quality-Gated): Exclude disqualified vendors based on Questionnaire Audit ──
-    # Vendor 4 (Balaji): Disqualified across ALL lines (expired ISO cert)
-    # Vendor 3 (Global): Disqualified on Lines 10 & 30 (no 7-ply capability)
-    # Vendor 5 (Standard Box): Disqualified on Lines 26 & 27 (no moisture barrier)
-    b_spends = []
-    c_spends = []
-
-    for _, row in df.iterrows():
-        l_no = int(row["Line #"])
-        qty = row["Est. Qty"]
-        crit = str(row.get("Criticality", "C")).strip().upper()
-
-        qualified = {}
-        if pd.notna(row["V1 (Apex)"]):
-            qualified["V1"] = row["V1 (Apex)"]
-        if pd.notna(row["V2 (PackTech)"]):
-            qualified["V2"] = row["V2 (PackTech)"]
-        if l_no not in [10, 30] and pd.notna(row["V3 (Global USD)"]):
-            qualified["V3"] = row["V3 (Global USD)"]
-        # V4 is locked out of B and C
-        if l_no not in [26, 27] and pd.notna(row["V5 (Standard Box)"]):
-            qualified["V5"] = row["V5 (Standard Box)"]
-
-        sorted_prices = sorted(qualified.values()) if qualified else [row["Budget Price"]]
-        best_b = sorted_prices[0]
-        b_spends.append(best_b * qty)
-
-        # ── Scenario C (Dual-Sourcing 70/30 on Criticality A lines) ──
-        if crit == "A" and len(sorted_prices) >= 2:
-            l1, l2 = sorted_prices[0], sorted_prices[1]
-            c_spends.append((0.70 * l1 + 0.30 * l2) * qty)
-        else:
-            c_spends.append(best_b * qty)
-
-    spend_b = float(sum(b_spends))
-    spend_c = float(sum(c_spends))
-    budget_spend = float((df["Budget Price"] * df["Est. Qty"]).sum())
-
-    cost_of_compliance = spend_b - spend_a
-    compliance_pct = (cost_of_compliance / spend_a) * 100.0 if spend_a > 0 else 0.0
-
-    return {
-        "budget_spend": budget_spend,
-        "spend_a": spend_a,
-        "spend_b": spend_b,
-        "spend_c": spend_c,
-        "savings_a": budget_spend - spend_a,
-        "savings_b": budget_spend - spend_b,
-        "savings_c": budget_spend - spend_c,
-        "cost_of_compliance": cost_of_compliance,
-        "compliance_pct": compliance_pct
-    }
+    return calculate_award_scenarios(df_current, quals)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -631,62 +592,72 @@ with st.sidebar:
 
     vendor_target = st.selectbox(
         "Assign Uploaded Quotes to Vendor:",
-        ["V5 (Standard Box)", "V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)"],
+        ["Auto-Detect from Document", "V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)"],
         index=0
     )
 
+    st.markdown("---")
+    st.markdown("##### 📁 Real Sample Quote Pack")
+    st.caption("Load all 5 real RFx vendor quotation files (Excel, PDF, Word, PNG, EML) through the genuine extraction pipeline:")
+    load_sample_pack = st.button("📂 Load Real Sample Quote Pack", use_container_width=True, type="secondary")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 9. EXECUTE LIVE EXTRACTION (IF FILES UPLOADED)
+# 9. EXECUTE LIVE EXTRACTION (IF FILES UPLOADED OR SAMPLE PACK REQUESTED)
 # ─────────────────────────────────────────────────────────────────────────────
+active_client, client_err = get_openai_client_or_status()
+
+# 9A. Handle Sample Pack Loading
+if 'load_sample_pack' in locals() and load_sample_pack:
+    sample_files_to_load = [
+        ("V1_Apex_Quote.xlsx", "sample_quotes/V1_Apex_Quote.xlsx"),
+        ("V2_PackTech_Quote.pdf", "sample_quotes/V2_PackTech_Quote.pdf"),
+        ("V3_Global_Quote.docx", "sample_quotes/V3_Global_Quote.docx"),
+        ("V4_Balaji_Quote.png", "sample_quotes/V4_Balaji_Quote.png"),
+        ("V5_StandardBox_Quote.eml", "sample_quotes/V5_StandardBox_Quote.eml")
+    ]
+    pack_audit_records = []
+    with st.spinner("Executing genuine document extraction across sample pack (Excel, PDF, Word, Image, EML)..."):
+        for fname, fpath in sample_files_to_load:
+            if os.path.exists(fpath):
+                with open(fpath, "rb") as f:
+                    fbytes = f.read()
+                meta = extract_vendor_quote_file(fbytes, fname, openai_client=active_client)
+                cnt = integrate_quotation_into_df_norm(meta)
+                verified = len([f for f in meta.fields if f.extraction_status == "Verified"])
+                needs_rev = len([f for f in meta.fields if f.extraction_status == "Needs Review"])
+                missing = len([f for f in meta.fields if f.extraction_status == "Missing"])
+                pack_audit_records.append({
+                    "Document": fname,
+                    "Format": meta.format,
+                    "Detected Vendor": meta.vendor_name,
+                    "Extraction Mode": meta.extraction_mode,
+                    "Items Processed": cnt,
+                    "Verified": verified,
+                    "Needs Review": needs_rev,
+                    "Missing / Omitted": missing
+                })
+        st.success("Successfully ingested 5 real vendor quotation documents into the normalized matrix!")
+        st.dataframe(pd.DataFrame(pack_audit_records), use_container_width=True, hide_index=True)
+
+# 9B. Handle Manual Uploaded Files
 if uploaded_files:
-    active_client, client_err = get_openai_client_or_status()
-    if not active_client:
-        st.error(client_err)
-        st.info("ℹ️ Live document extraction and Vision OCR require a valid server-side OpenAI API key.")
-    else:
-        if "processed_files" not in st.session_state:
-            st.session_state.processed_files = set()
+    if "processed_files" not in st.session_state:
+        st.session_state.processed_files = set()
 
-        for up_file in uploaded_files:
-            if up_file.name not in st.session_state.processed_files:
-                with st.spinner(f"Extracting live data from {up_file.name} using Vision/LLM..."):
-                    try:
-                        quotes_extracted = extract_vendor_quote(up_file, active_client)
-                        
-                        # Merge extracted quotes into st.session_state.df_norm
-                        count = 0
-                        for q in quotes_extracted:
-                            l_item = q.get("line_item")
-                            p_val = q.get("price")
-                            u_str = q.get("unit", "Nos")
-                            src_cite = q.get("source_citation", f"Extracted from {up_file.name}")
-
-                            if l_item and l_item in st.session_state.df_norm["Line #"].values:
-                                row_idx = st.session_state.df_norm["Line #"] == l_item
-                                d_loc = st.session_state.df_norm.loc[row_idx, "Delivery Location"].values[0]
-                                c_wt = st.session_state.df_norm.loc[row_idx, "Est. Wt (kg)"].values[0]
-                                is_new = l_item in [25, 27, 28, 29, 30]
-
-                                landed, flag, cite = normalize_extracted_quote(
-                                    f"{p_val} {u_str}" if p_val is not None else u_str,
-                                    l_item, d_loc, c_wt, is_new
-                                )
-
-                                st.session_state.df_norm.loc[row_idx, vendor_target] = landed
-                                cite_col = f"{vendor_target.split()[0]} Citation"
-                                if cite_col in st.session_state.df_norm.columns:
-                                    st.session_state.df_norm.loc[row_idx, cite_col] = f"{src_cite} -> {cite}"
-                                if vendor_target == "V5 (Standard Box)":
-                                    st.session_state.df_norm.loc[row_idx, "V5 Trust Flag"] = flag
-
-                                count += 1
-
-                        st.session_state.processed_files.add(up_file.name)
-                        st.success(f"Live Extracted {count} line items from {up_file.name} into {vendor_target}!")
-                    except Exception as e:
-                        diag_msg = format_openai_api_error(e)
-                        st.error(f"Live extraction error on {up_file.name}: {diag_msg}")
+    for up_file in uploaded_files:
+        if up_file.name not in st.session_state.processed_files:
+            with st.spinner(f"Extracting live data from {up_file.name}..."):
+                try:
+                    fbytes = up_file.getvalue()
+                    meta = extract_vendor_quote_file(fbytes, up_file.name, openai_client=active_client)
+                    target = None if vendor_target == "Auto-Detect from Document" else vendor_target
+                    cnt = integrate_quotation_into_df_norm(meta, target_vendor=target)
+                    st.session_state.processed_files.add(up_file.name)
+                    st.success(f"Extracted and normalized {cnt} line items from {up_file.name} (Vendor: {meta.vendor_name}, Mode: {meta.extraction_mode})!")
+                except Exception as e:
+                    diag_msg = format_openai_api_error(e)
+                    st.error(f"Live extraction error on {up_file.name}: {diag_msg}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1006,6 +977,60 @@ elif nav == "🎯 Live Award Scenarios Engine":
         </div>
     </div>
     """, unsafe_allow_html=True)
+
+    # Vendor Allocation & Spend Shares Table
+    st.markdown("### 🏆 Vendor Allocations & Spend Shares")
+    shares_b = live_scenarios.get("vendor_shares_b", {})
+    shares_c = live_scenarios.get("vendor_shares_c", {})
+    all_vendors = sorted(list(set(list(shares_b.keys()) + list(shares_c.keys()))))
+    
+    shares_data = []
+    for v in all_vendors:
+        sb = shares_b.get(v, {})
+        sc = shares_c.get(v, {})
+        shares_data.append({
+            "Vendor": v,
+            "Scenario B Spend (₹)": f"₹{sb.get('spend', 0.0):,.0f}",
+            "Scenario B Share": f"{sb.get('share_pct', 0.0):.1f}%",
+            "Scenario C Spend (₹)": f"₹{sc.get('spend', 0.0):,.0f}",
+            "Scenario C Share": f"{sc.get('share_pct', 0.0):.1f}%"
+        })
+    if shares_data:
+        st.dataframe(pd.DataFrame(shares_data), use_container_width=True, hide_index=True)
+
+    # Mandatory Line Coverage & Uncovered Lines
+    uncovered_b = live_scenarios.get("uncovered_lines_b", [])
+    if uncovered_b:
+        st.warning(f"⚠️ Mandatory Line Coverage Alert: {len(uncovered_b)} line(s) currently UNCOVERED in Scenario B: {uncovered_b}. No eligible vendor has a compliant quote for these lines.")
+    else:
+        st.success("✅ Mandatory Line Coverage: 100% of all 30 packaging lines covered by compliant, quality-gated suppliers in Scenario B.")
+
+    # Conditional Discounts & Policy Exceptions
+    discounts = live_scenarios.get("discounts_evaluated", {})
+    if discounts:
+        st.markdown("##### 🏷️ Conditional Discounts Evaluation")
+        disc_rows = []
+        for v, d in discounts.items():
+            disc_rows.append({
+                "Vendor": v,
+                "Condition": d.get("description", "-"),
+                "Discount %": f"{d.get('discount_pct', 0.0)*100:.1f}%",
+                "Applied?": "Yes" if d.get("applied") else "No",
+                "Status": d.get("status", "-")
+            })
+        st.dataframe(pd.DataFrame(disc_rows), use_container_width=True, hide_index=True)
+
+    # Detailed Line Item Allocation Tables
+    st.markdown("### 📋 Line Item Allocation Breakdown")
+    tab_b, tab_c = st.tabs(["Scenario B: Quality-Gated L1", "Scenario C: Dual Sourcing (70/30)"])
+    with tab_b:
+        if live_scenarios.get("b_line_allocations"):
+            df_alloc_b = pd.DataFrame(live_scenarios["b_line_allocations"])
+            st.dataframe(df_alloc_b, use_container_width=True, hide_index=True)
+    with tab_c:
+        if live_scenarios.get("c_line_allocations"):
+            df_alloc_c = pd.DataFrame(live_scenarios["c_line_allocations"])
+            st.dataframe(df_alloc_c, use_container_width=True, hide_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

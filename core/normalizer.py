@@ -1,21 +1,29 @@
 """
 Deterministic price normalization engine.
 Handles:
-- Per-piece, Per-1,000, Per-kg, Per-sqm
-- FX conversions with configurable rate and effective date
-- Freight rate additions (freight included vs freight extra)
-- Historical PO resolution for repeat SKUs (+3.6% index)
-- Unresolved flagging for New SKUs with missing PO history
-- Take-up factors (with BCB = 1.45)
-- Preserves exact source citations and trust flags
+- Currency conversion (INR & foreign currencies with explicit exchange rate & effective date)
+- Per-piece and per-1,000 pieces
+- Per-kg conversions only with valid weight basis (no invented default weight)
+- Per-sqm conversions only with valid area basis
+- Freight treatment (included vs extra) based on quote terms
+- GST treatment (included vs excluded) without double-counting tax
+- Conditional discounts applied only when conditions are satisfied
+- Unresolved flagging with exact missing inputs for buyer review
+- Preserves full audit traceability for every normalized quote
 """
 
 import re
+from typing import Tuple, Optional, Dict, Any, List
 import numpy as np
 import pandas as pd
-from typing import Tuple, Optional, Dict, Any
 
-from core.config import TAKEUP_FACTORS, DEFAULT_FX_RATE, DEFAULT_FREIGHT_RATES
+from core.config import (
+    TAKEUP_FACTORS,
+    DEFAULT_FX_RATE,
+    DEFAULT_FX_EFFECTIVE_DATE,
+    DEFAULT_FREIGHT_RATES
+)
+from core.models import NormalizationResult, UnresolvedStatus
 
 
 def calculate_composite_weight(
@@ -23,30 +31,91 @@ def calculate_composite_weight(
     flute: str,
     liner_gsm: float,
     fluting_gsm: float,
-    board_l_mm: float,
-    board_w_mm: float,
+    board_l_mm: Optional[float] = None,
+    board_w_mm: Optional[float] = None,
     takeup_factors: Optional[Dict[str, float]] = None
-) -> Tuple[float, float]:
+) -> Tuple[Optional[float], Optional[float]]:
     """
     Calculates Composite GSM and Est. Weight per UoM (kg).
     Formula from RFx Master:
     Composite GSM = ((Ply + 1) / 2) * Liner_GSM + ((Ply - 1) / 2) * Fluting_GSM * Takeup
     Weight (kg) = (Board_L * Board_W / 1,000,000) * (Composite_GSM / 1,000)
     Note: Takeup factor for BCB is 1.45.
+    
+    If board dimensions or technical parameters are missing/non-positive,
+    does NOT invent default dimensions; returns None for weight.
     """
     factors = takeup_factors or TAKEUP_FACTORS
-    flute_clean = str(flute or "B").strip().upper()
-    takeup = factors.get(flute_clean, 1.32)
+    flute_clean = str(flute or "").strip().upper()
+    if flute_clean not in factors:
+        return None, None
 
-    comp_gsm = ((ply + 1.0) / 2.0) * liner_gsm + ((ply - 1.0) / 2.0) * fluting_gsm * takeup
-    
-    # Board dimensions in meters
-    bl = float(board_l_mm) if pd.notna(board_l_mm) and board_l_mm > 0 else 1000.0
-    bw = float(board_w_mm) if pd.notna(board_w_mm) and board_w_mm > 0 else 500.0
+    takeup = factors[flute_clean]
+
+    if pd.isna(ply) or pd.isna(liner_gsm) or pd.isna(fluting_gsm):
+        return None, None
+    if ply <= 0 or liner_gsm <= 0 or fluting_gsm <= 0:
+        return None, None
+
+    comp_gsm = ((float(ply) + 1.0) / 2.0) * float(liner_gsm) + ((float(ply) - 1.0) / 2.0) * float(fluting_gsm) * takeup
+
+    # Check board dimensions strictly - do NOT use silent default dimensions
+    if (
+        board_l_mm is None or pd.isna(board_l_mm) or float(board_l_mm) <= 0 or
+        board_w_mm is None or pd.isna(board_w_mm) or float(board_w_mm) <= 0
+    ):
+        return round(comp_gsm, 2), None
+
+    bl = float(board_l_mm)
+    bw = float(board_w_mm)
     area_sqm = (bl * bw) / 1e6
     weight_kg = area_sqm * (comp_gsm / 1e3)
 
     return round(comp_gsm, 2), round(weight_kg, 4)
+
+
+def parse_uom(raw_unit: Optional[str]) -> str:
+    """
+    Classifies quotation unit of measure deterministically.
+    Does NOT treat Nos, Set, Sqm, Running Metre, and Kg as interchangeable.
+    Returns: 'piece', 'per_1000', 'kg', 'sqm', 'set', 'running_metre', or 'unsupported'
+    """
+    if not raw_unit or pd.isna(raw_unit):
+        return "unknown"
+    u = str(raw_unit).strip().lower()
+    u_clean = u.replace(",", "")
+
+    # Thousand rate
+    if any(k in u_clean for k in ["per 1000", "per 1,000", "/1000", "/1,000", "1000 nos", "1000 pcs", "thousand", "k nos"]):
+        return "per_1000"
+    if u_clean in ["1000", "1,000"]:
+        return "per_1000"
+
+    # Weight
+    if any(k in u for k in ["/kg", "per kg", "₹/kg", "rs/kg", "inr/kg", "kg"]):
+        return "kg"
+
+    # Area
+    if any(k in u for k in ["/sqm", "per sqm", "sqm", "sq.m", "sq m", "m2", "/m2"]):
+        return "sqm"
+
+    # Set
+    if "set" in u:
+        return "set"
+
+    # Running Metre
+    if any(k in u for k in ["running metre", "running meter", "rm", "rmt", "/rm"]):
+        return "running_metre"
+
+    # Piece / Each
+    if any(k in u for k in ["nos", "piece", "pc", "box", "ea", "each", "per piece", "per nos", "/piece", "/nos"]):
+        return "piece"
+
+    # Currency strings passed as unit (e.g. "USD", "$", "INR") represent direct unit prices
+    if u in ["usd", "$", "inr", "rs", "₹", "eur", "gbp"]:
+        return "piece"
+
+    return "unsupported"
 
 
 def normalize_price(
@@ -54,75 +123,372 @@ def normalize_price(
     raw_unit: Optional[str] = None,
     raw_currency: str = "INR",
     line_no: int = 1,
-    delivery_location: str = "Pune (Chakan plant)",
+    delivery_location: Optional[str] = None,
     item_weight_kg: Optional[float] = None,
+    item_area_sqm: Optional[float] = None,
+    target_uom: str = "Nos",
     is_new_sku: bool = False,
     last_po_price: Optional[float] = None,
-    fx_rate: float = DEFAULT_FX_RATE,
+    fx_rate: Optional[float] = None,
+    fx_effective_date: Optional[str] = None,
     freight_rates: Optional[Dict[str, float]] = None,
     freight_included: bool = False,
+    freight_extra_rate: Optional[float] = None,
+    gst_included: bool = False,
+    gst_rate: float = 0.18,
+    discount_pct: float = 0.0,
+    discount_condition: Optional[str] = None,
+    condition_met: bool = False,
     inflation_index: float = 0.036
-) -> Tuple[Optional[float], str, str, str]:
+) -> NormalizationResult:
     """
-    Deterministic price normalizer returning:
-    (landed_cost, trust_flag, formula_citation, extraction_status)
+    Deterministic price normalizer strictly adhering to RFx assumptions:
+    - Never uses silent default weight, freight, or exchange rate.
+    - If conversion inputs are missing/ambiguous, sets normalized price to None and status to 'Unresolved'.
+    - Returns NormalizationResult with full audit traceability (unpacks as 4-tuple for backward compatibility).
     """
-    f_rates = freight_rates or DEFAULT_FREIGHT_RATES
-    freight_rate = f_rates.get(delivery_location, 1.20)
+    orig_val = raw_value
+    orig_curr = str(raw_currency or "INR").strip().upper()
+    orig_uom = str(raw_unit or "").strip()
 
-    # Missing or empty checks
+    # 1. Missing or empty checks
     if raw_value is None or pd.isna(raw_value):
-        raw_str = str(raw_unit or "").strip().lower()
+        raw_str = orig_uom.lower()
         if not raw_str or any(k in raw_str for k in ["missing", "none", "nan"]):
-            return None, "Missing / Not Quoted", "Quote omitted by vendor", "Missing"
+            return NormalizationResult(
+                normalized_price=None,
+                status="Missing",
+                trust_flag="Missing / Not Quoted",
+                formula_citation="Quote omitted by vendor",
+                missing_inputs=["Quote price"],
+                original_value=orig_val,
+                original_currency=orig_curr,
+                original_uom=orig_uom,
+                unresolved_reason="Quote omitted by vendor"
+            )
     else:
-        raw_str = f"{raw_value} {raw_unit or ''}".strip().lower()
+        raw_str = f"{raw_value} {orig_uom}".strip().lower()
 
-    if any(k in raw_str for k in ["unresolved", "not quoted", "disqualified", "omitted"]):
-        if "disqualified" in raw_str:
-            return None, "Disqualified", "Vendor disqualified for this line item specification", "Verified"
-        return None, "UNRESOLVED", f"Unresolved quotation entry: '{raw_value}'", "Needs Review"
+    # Explicit Disqualified check
+    if "disqualified" in raw_str:
+        return NormalizationResult(
+            normalized_price=None,
+            status="Verified",
+            trust_flag="Disqualified",
+            formula_citation="Vendor disqualified for this line item specification",
+            missing_inputs=[],
+            original_value=orig_val,
+            original_currency=orig_curr,
+            original_uom=orig_uom,
+            unresolved_reason="Vendor disqualified for this line item specification"
+        )
 
-    # Historical PO check ("Same as last year")
+    # Explicit Not Quoted check
+    if any(k in raw_str for k in ["not quoted", "omitted"]):
+        return NormalizationResult(
+            normalized_price=None,
+            status="Missing",
+            trust_flag="Missing / Not Quoted",
+            formula_citation=f"Line omitted by vendor: '{raw_value}'",
+            missing_inputs=["Quote price"],
+            original_value=orig_val,
+            original_currency=orig_curr,
+            original_uom=orig_uom,
+            unresolved_reason=f"Quote omitted by vendor: '{raw_value}'"
+        )
+
+    # 2. Historical PO check ("Same as last year")
     if "same as last year" in raw_str or "historical" in raw_str:
-        if is_new_sku or pd.isna(last_po_price) or float(last_po_price or 0) <= 0:
+        if is_new_sku or last_po_price is None or pd.isna(last_po_price) or float(last_po_price or 0) <= 0:
             citation = "Quoted 'Same as last year', but item is a New SKU with no PO history -> UNRESOLVED"
-            return None, "UNRESOLVED", citation, "Needs Review"
+            return NormalizationResult(
+                normalized_price=None,
+                status=UnresolvedStatus("Unresolved"),
+                trust_flag="UNRESOLVED",
+                formula_citation=citation,
+                missing_inputs=["FY25 Historical PO Price"],
+                original_value=orig_val,
+                original_currency=orig_curr,
+                original_uom=orig_uom,
+                unresolved_reason="Missing historical PO price for repeat SKU reference. Buyer review required."
+            )
         else:
-            landed = round(float(last_po_price) * (1.0 + inflation_index), 2)
-            citation = f"Resolved from FY25 PO (₹{float(last_po_price):.2f}) + {inflation_index*100:.1f}% index = ₹{landed:.2f}"
-            return landed, "Inferred (PO History)", citation, "Verified"
+            base_po = float(last_po_price)
+            landed = round(base_po * (1.0 + inflation_index), 2)
+            citation = f"Resolved from FY25 PO (₹{base_po:.2f}) + {inflation_index*100:.1f}% index = ₹{landed:.2f}"
+            return NormalizationResult(
+                normalized_price=landed,
+                status="Verified",
+                trust_flag="Inferred (PO History)",
+                formula_citation=citation,
+                missing_inputs=[],
+                original_value=orig_val,
+                original_currency=orig_curr,
+                original_uom=orig_uom,
+                applied_formula=f"FY25_PO * (1 + {inflation_index})"
+            )
 
-    # Extract numeric amount
+    # 3. Extract numeric price
     match = re.search(r"[-+]?(?:\d*\.\d+|\d+)", str(raw_value).replace(",", ""))
     if not match:
-        return None, "UNRESOLVED", f"Unparseable price string: '{raw_value}'", "Needs Review"
+        return NormalizationResult(
+            normalized_price=None,
+            status=UnresolvedStatus("Unresolved"),
+            trust_flag="UNRESOLVED",
+            formula_citation=f"Unparseable price string: '{raw_value}'",
+            missing_inputs=["Numeric price value"],
+            original_value=orig_val,
+            original_currency=orig_curr,
+            original_uom=orig_uom,
+            unresolved_reason=f"Cannot extract numeric price from '{raw_value}'. Buyer review required."
+        )
 
-    numeric_val = float(match.group(0))
+    quoted_numeric = float(match.group(0))
 
-    # Currency conversion: USD
-    if "usd" in raw_str or "$" in raw_str or str(raw_currency).upper() == "USD":
-        inr_val = round(numeric_val * fx_rate, 2)
-        citation = f"USD ${numeric_val:.4f} × ₹{fx_rate:.2f}/USD = ₹{inr_val:.2f}"
-        return inr_val, "Inferred (USD to INR)", citation, "Verified"
+    # 4. Currency conversion check
+    is_foreign_currency = (
+        orig_curr != "INR" or
+        "usd" in raw_str or "$" in raw_str or
+        any(c in raw_str for c in ["eur", "gbp", "jpy", "cny"])
+    )
 
-    # Weight-based pricing: ₹/kg
-    if "kg" in raw_str or "per kg" in raw_str:
-        if item_weight_kg is None or pd.isna(item_weight_kg) or item_weight_kg <= 0:
-            return None, "UNRESOLVED", "Weight missing for kg-based conversion -> UNRESOLVED", "Needs Review"
-        
+    eff_fx_rate = 1.0
+    eff_fx_date = None
+    if is_foreign_currency:
+        if fx_rate is None or pd.isna(fx_rate) or float(fx_rate) <= 0:
+            return NormalizationResult(
+                normalized_price=None,
+                status=UnresolvedStatus("Unresolved"),
+                trust_flag="UNRESOLVED",
+                formula_citation=f"Foreign currency quote ({orig_curr}) with no configured FX rate -> UNRESOLVED",
+                missing_inputs=["Configured exchange rate (FX Rate)"],
+                original_value=orig_val,
+                original_currency=orig_curr,
+                original_uom=orig_uom,
+                unresolved_reason=f"Missing exchange rate for {orig_curr}. Buyer review required."
+            )
+        eff_fx_rate = float(fx_rate)
+        eff_fx_date = fx_effective_date or DEFAULT_FX_EFFECTIVE_DATE
+        price_in_inr = quoted_numeric * eff_fx_rate
+        fx_formula_part = f"{orig_curr} {quoted_numeric:.4f} × ₹{eff_fx_rate:.2f}/{orig_curr} (eff. {eff_fx_date})"
+    else:
+        price_in_inr = quoted_numeric
+        fx_formula_part = f"₹{quoted_numeric:.2f}"
+
+    # 5. Determine quoted and target UOM
+    quoted_uom_type = parse_uom(raw_unit if raw_unit else raw_str)
+    target_uom_type = parse_uom(target_uom)
+
+    # 6. UOM conversions
+    # Unsupported or unknown UOM
+    if quoted_uom_type in ["unknown", "unsupported"]:
+        return NormalizationResult(
+            normalized_price=None,
+            status=UnresolvedStatus("Unresolved"),
+            trust_flag="UNRESOLVED",
+            formula_citation=f"Unsupported or ambiguous UOM: '{raw_unit or raw_value}' -> UNRESOLVED",
+            missing_inputs=["Valid standard unit of measure (UOM)"],
+            original_value=orig_val,
+            original_currency=orig_curr,
+            original_uom=orig_uom,
+            exchange_rate=eff_fx_rate if is_foreign_currency else None,
+            exchange_rate_date=eff_fx_date if is_foreign_currency else None,
+            unresolved_reason=f"Unsupported UOM '{raw_unit or raw_value}'. Cannot convert to {target_uom}. Buyer review required."
+        )
+
+    # Check for non-interchangeable UOM combinations:
+    # Set vs Piece
+    if quoted_uom_type == "set" and target_uom_type != "set":
+        return NormalizationResult(
+            normalized_price=None,
+            status=UnresolvedStatus("Unresolved"),
+            trust_flag="UNRESOLVED",
+            formula_citation="Quoted per Set while target is Nos/Piece without piece-per-set ratio -> UNRESOLVED",
+            missing_inputs=["Pieces per Set specification"],
+            original_value=orig_val,
+            original_currency=orig_curr,
+            original_uom=orig_uom,
+            unresolved_reason="Quoted per Set; pieces per Set conversion basis missing. Buyer review required."
+        )
+    if quoted_uom_type != "set" and target_uom_type == "set" and quoted_uom_type not in ["kg", "sqm"]:
+        # Piece quoted for a Set line without piece-per-set ratio
+        return NormalizationResult(
+            normalized_price=None,
+            status=UnresolvedStatus("Unresolved"),
+            trust_flag="UNRESOLVED",
+            formula_citation=f"Quoted {quoted_uom_type} while target UOM is Set without conversion ratio -> UNRESOLVED",
+            missing_inputs=["Set composition / piece ratio"],
+            original_value=orig_val,
+            original_currency=orig_curr,
+            original_uom=orig_uom,
+            unresolved_reason="Quoted per piece while RFx line UOM is Set. Buyer review required."
+        )
+
+    # Running Metre
+    if quoted_uom_type == "running_metre":
+        return NormalizationResult(
+            normalized_price=None,
+            status=UnresolvedStatus("Unresolved"),
+            trust_flag="UNRESOLVED",
+            formula_citation="Quoted per Running Metre; conversion to piece requires cutting/board length -> UNRESOLVED",
+            missing_inputs=["Board length per piece for running metre conversion"],
+            original_value=orig_val,
+            original_currency=orig_curr,
+            original_uom=orig_uom,
+            unresolved_reason="Quoted in Running Metre. Conversion basis missing. Buyer review required."
+        )
+
+    # 7. Convert base price according to UOM
+    price_per_piece = 0.0
+    uom_formula_part = ""
+    applied_formula_name = ""
+    missing_inputs_list: List[str] = []
+
+    if quoted_uom_type == "per_1000":
+        price_per_piece = price_in_inr / 1000.0
+        uom_formula_part = f"{fx_formula_part} ÷ 1,000"
+        applied_formula_name = "Price / 1000"
+
+    elif quoted_uom_type == "kg":
+        # Per-kg conversion REQUIRES known, valid weight basis
+        if item_weight_kg is None or pd.isna(item_weight_kg) or float(item_weight_kg) <= 0:
+            return NormalizationResult(
+                normalized_price=None,
+                status=UnresolvedStatus("Unresolved"),
+                trust_flag="UNRESOLVED",
+                formula_citation="Weight missing for kg-based conversion -> UNRESOLVED",
+                missing_inputs=["Item weight basis (kg/UoM)"],
+                original_value=orig_val,
+                original_currency=orig_curr,
+                original_uom=orig_uom,
+                exchange_rate=eff_fx_rate if is_foreign_currency else None,
+                exchange_rate_date=eff_fx_date if is_foreign_currency else None,
+                unresolved_reason="Quoted in ₹/kg but item weight basis is missing or zero. Buyer review required."
+            )
         wt = float(item_weight_kg)
-        eff_freight = 0.0 if freight_included else freight_rate
-        landed = round((numeric_val + eff_freight) * wt, 2)
-        f_note = "" if freight_included else f" + ₹{eff_freight:.2f} freight"
-        citation = f"(₹{numeric_val:.2f}/kg{f_note}) × {wt:.4f}kg = ₹{landed:.2f}"
-        return landed, "Inferred (kg to piece)", citation, "Verified"
 
-    # Thousand rate: Per 1,000 Nos
-    if "1000" in raw_str or "/1,000" in raw_str:
-        landed = round(numeric_val / 1000.0, 2)
-        citation = f"₹{numeric_val:,.2f} per 1,000 Nos ÷ 1000 = ₹{landed:.2f}"
-        return landed, "Inferred (/1000 to piece)", citation, "Verified"
+        # Handle freight for kg quote
+        # Freight included vs extra
+        freight_per_kg = 0.0
+        freight_treatment_desc = "Freight included in base quote"
+        if not freight_included:
+            if freight_extra_rate is not None and not pd.isna(freight_extra_rate) and float(freight_extra_rate) >= 0:
+                freight_per_kg = float(freight_extra_rate)
+                freight_treatment_desc = f"Freight extra: ₹{freight_per_kg:.2f}/kg applied"
+            elif delivery_location:
+                f_rates = freight_rates or DEFAULT_FREIGHT_RATES
+                if delivery_location in f_rates:
+                    freight_per_kg = f_rates[delivery_location]
+                    freight_treatment_desc = f"Freight extra: ₹{freight_per_kg:.2f}/kg for {delivery_location}"
+                else:
+                    return NormalizationResult(
+                        normalized_price=None,
+                        status=UnresolvedStatus("Unresolved"),
+                        trust_flag="UNRESOLVED",
+                        formula_citation=f"Delivery location '{delivery_location}' missing freight rate -> UNRESOLVED",
+                        missing_inputs=[f"Freight rate for delivery location '{delivery_location}'"],
+                        original_value=orig_val,
+                        original_currency=orig_curr,
+                        original_uom=orig_uom,
+                        unresolved_reason=f"Freight rate unknown for '{delivery_location}'. Buyer review required."
+                    )
+            else:
+                return NormalizationResult(
+                    normalized_price=None,
+                    status=UnresolvedStatus("Unresolved"),
+                    trust_flag="UNRESOLVED",
+                    formula_citation="Freight extra quoted but delivery location/rate missing -> UNRESOLVED",
+                    missing_inputs=["Delivery location or freight rate"],
+                    original_value=orig_val,
+                    original_currency=orig_curr,
+                    original_uom=orig_uom,
+                    unresolved_reason="'Freight extra' quoted without rate or location. Landed cost unresolved. Buyer review required."
+                )
 
-    # Standard direct rate
-    return round(numeric_val, 2), "Verified", f"₹{numeric_val:.2f} direct piece quote", "Verified"
+        total_rate_per_kg = price_in_inr + freight_per_kg
+        price_per_piece = total_rate_per_kg * wt
+        f_note = f" + ₹{freight_per_kg:.2f} freight" if (not freight_included and freight_per_kg > 0) else ""
+        uom_formula_part = f"({fx_formula_part}/kg{f_note}) × {wt:.4f}kg"
+        applied_formula_name = "(Rate/kg + Freight/kg) * Weight_kg"
+
+    elif quoted_uom_type == "sqm":
+        # Per-sqm conversion REQUIRES known, valid area basis
+        if item_area_sqm is None or pd.isna(item_area_sqm) or float(item_area_sqm) <= 0:
+            return NormalizationResult(
+                normalized_price=None,
+                status=UnresolvedStatus("Unresolved"),
+                trust_flag="UNRESOLVED",
+                formula_citation="Area basis missing for sqm-based conversion -> UNRESOLVED",
+                missing_inputs=["Item area basis (sqm/UoM)"],
+                original_value=orig_val,
+                original_currency=orig_curr,
+                original_uom=orig_uom,
+                exchange_rate=eff_fx_rate if is_foreign_currency else None,
+                exchange_rate_date=eff_fx_date if is_foreign_currency else None,
+                unresolved_reason="Quoted in ₹/sqm but item board area is missing. Buyer review required."
+            )
+        area = float(item_area_sqm)
+        price_per_piece = price_in_inr * area
+        uom_formula_part = f"({fx_formula_part}/sqm) × {area:.4f}sqm"
+        applied_formula_name = "Rate_sqm * Area_sqm"
+
+    else:
+        # Standard piece quote
+        price_per_piece = price_in_inr
+        uom_formula_part = fx_formula_part
+        applied_formula_name = "Direct piece quote"
+
+    # 8. Tax Treatment: GST included vs excluded (RFQ requires landed price excluding GST)
+    tax_treatment_desc = "GST 18% extra (excluded from landed price)"
+    if gst_included:
+        # Quote includes GST -> back out GST to avoid double-counting tax
+        tax_treatment_desc = f"GST {gst_rate*100:.0f}% included in quote; backed out (÷ {1.0+gst_rate:.2f})"
+        price_per_piece = price_per_piece / (1.0 + gst_rate)
+        uom_formula_part = f"({uom_formula_part}) ÷ {1.0+gst_rate:.2f} [GST Excluded]"
+
+    # 9. Conditional Discounts: Applied ONLY if conditions are satisfied
+    discount_applied_amount = 0.0
+    if discount_pct > 0:
+        if condition_met:
+            discount_applied_amount = price_per_piece * discount_pct
+            price_per_piece = price_per_piece * (1.0 - discount_pct)
+            uom_formula_part = f"({uom_formula_part}) - {discount_pct*100:.1f}% discount [{discount_condition}]"
+            discount_desc = f"{discount_pct*100:.1f}% applied (Condition satisfied: {discount_condition})"
+        else:
+            discount_desc = f"{discount_pct*100:.1f}% NOT applied (Condition unmet: {discount_condition})"
+    else:
+        discount_desc = None
+
+    landed_cost = round(price_per_piece, 2)
+    final_citation = f"{uom_formula_part} = ₹{landed_cost:.2f}"
+
+    # Determine trust flag
+    if is_foreign_currency:
+        trust_flag = "Inferred (USD to INR)" if orig_curr == "USD" else f"Inferred ({orig_curr} to INR)"
+    elif quoted_uom_type == "per_1000":
+        trust_flag = "Inferred (/1000 to piece)"
+    elif quoted_uom_type == "kg":
+        trust_flag = "Inferred (kg to piece)"
+    elif quoted_uom_type == "sqm":
+        trust_flag = "Inferred (sqm to piece)"
+    else:
+        trust_flag = "Verified"
+
+    return NormalizationResult(
+        normalized_price=landed_cost,
+        status="Verified",
+        trust_flag=trust_flag,
+        formula_citation=final_citation,
+        missing_inputs=[],
+        original_value=orig_val,
+        original_currency=orig_curr,
+        original_uom=orig_uom,
+        applied_formula=applied_formula_name,
+        exchange_rate=eff_fx_rate if is_foreign_currency else None,
+        exchange_rate_date=eff_fx_date if is_foreign_currency else None,
+        freight_treatment="Included" if freight_included else "Extra",
+        tax_treatment=tax_treatment_desc,
+        applied_discount=discount_pct if (discount_pct > 0 and condition_met) else 0.0,
+        discount_condition=discount_condition,
+        unresolved_reason=None
+    )

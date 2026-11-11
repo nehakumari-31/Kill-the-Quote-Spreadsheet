@@ -4,7 +4,7 @@ Context-aware analytical reasoning connected to live state.
 Uses OpenAI client when available; provides deterministic reasoning in Demo Mode.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import pandas as pd
 
 
@@ -17,11 +17,14 @@ def build_system_context(
     fx_rate: float
 ) -> str:
     """Builds comprehensive live context prompt for the AI Analyst."""
-    matrix_md = df_matrix[[
-        "Line #", "Item Code", "Description", "Est. Qty", "Delivery Location", "Criticality",
-        "V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)",
-        "V1 Citation", "V2 Citation", "V3 Citation", "V4 Citation", "V5 Citation", "V5 Trust Flag"
-    ]].to_markdown(index=False)
+    cols_to_include = [
+        c for c in [
+            "Line #", "Item Code", "Description", "Est. Qty", "Delivery Location", "Criticality",
+            "V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)",
+            "V1 Citation", "V2 Citation", "V3 Citation", "V4 Citation", "V5 Citation", "V5 Trust Flag"
+        ] if c in df_matrix.columns
+    ]
+    matrix_md = df_matrix[cols_to_include].to_markdown(index=False)
 
     audit_md = df_audit.to_markdown(index=False)
 
@@ -81,7 +84,8 @@ def answer_query(
 ) -> Tuple[str, str]:
     """
     Answers buyer query.
-    Returns (response_text, execution_mode).
+    Uses OpenAI client when available; otherwise executes deterministic analytical reasoning.
+    Clearly distinguishes confirmed facts, unresolved data, and missing data.
     """
     system_prompt = build_system_context(df_matrix, df_audit, qualifications, scenarios, overrides, fx_rate)
 
@@ -93,93 +97,163 @@ def answer_query(
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_query}
                 ],
-                temperature=0.1
+                temperature=0.0
             )
             return completion.choices[0].message.content, "Live OpenAI GPT-4o"
         except Exception as e:
-            fallback_ans = _deterministic_analyst_answer(user_query, df_matrix, qualifications, scenarios)
-            return f"⚠️ OpenAI API Error: {e}\n\n**Deterministic Reasoning:**\n{fallback_ans}", "Deterministic Engine (API Error)"
+            fallback_ans = _deterministic_analyst_answer(user_query, df_matrix, qualifications, scenarios, overrides)
+            return f"⚠️ OpenAI API is unavailable: {e}\n\n**Deterministic Reasoning from Live State:**\n\n{fallback_ans}", "Deterministic Engine (API Unavailable)"
 
-    # Demo Mode (no API key provided)
-    ans = _deterministic_analyst_answer(user_query, df_matrix, qualifications, scenarios)
-    return ans, "Deterministic Analytics Engine (Demo Mode - Enter API Key for GPT-4o)"
+    # Deterministic Engine Mode (no API key configured)
+    ans = _deterministic_analyst_answer(user_query, df_matrix, qualifications, scenarios, overrides)
+    return ans, "Deterministic Analytics Engine (Live State Connected)"
 
 
 def _deterministic_analyst_answer(
     query: str,
     df_matrix: pd.DataFrame,
     qualifications: Dict[str, Any],
-    scenarios: Dict[str, Any]
+    scenarios: Dict[str, Any],
+    overrides: Optional[List[Any]] = None
 ) -> str:
-    """Answers specific queries deterministically from active state."""
+    """
+    Answers buyer queries dynamically using deterministic functions on the live state.
+    Distinguishes confirmed facts, unresolved data, missing data, and disqualifications.
+    """
+    import re
     q_low = query.lower()
 
-    if "unresolved" in q_low and ("27" in q_low or "cp-027" in q_low):
-        return (
-            "### Analysis for Line 27 (CP-027 - Export Carton 650x450x400):\n"
-            "- **Vendor 5 (Standard Box) Status:** `UNRESOLVED`\n"
-            "- **Root Cause Evidence:** In their quotation email, Standard Box Corp quoted 'Same as last year'. "
-            "However, CP-027 is a **New SKU** in the RFx master with no historical FY25 purchase order price on record. "
-            "Therefore, no baseline price exists to index.\n"
-            "- **Technical Disqualification:** Line 27 requires moisture-barrier treatment for export. Standard Box Corp "
-            "failed Questionnaire Gate Q7 ('Do not provide moisture-barrier treatment'). Even if priced, Vendor 5 cannot be awarded this line.\n"
-            "- **Action Required:** Buyer must either obtain a direct piece quotation or award to qualified L1 (Vendor 4 is disqualified, making Vendor 3 or Vendor 1 the qualified candidate)."
-        )
+    # 1. Line-Specific Inquiries (e.g. Line 10, Line 27, CP-010, etc.)
+    line_match = re.search(r"\b(?:line\s*|cp-0*)(\d{1,2})\b", q_low)
+    if line_match:
+        target_line = int(line_match.group(1))
+        matching_rows = df_matrix[df_matrix["Line #"] == target_line]
+        if not matching_rows.empty:
+            row = matching_rows.iloc[0]
+            code = str(row.get("Item Code", f"CP-{target_line:03d}"))
+            desc = str(row.get("Description", ""))
+            qty = row.get("Est. Qty", 0)
+            budget = row.get("Budget Price", 0.0)
+            loc = row.get("Delivery Location", "Pune")
+            crit = row.get("Criticality", "C")
 
-    if "cp-010" in q_low or "line 10" in q_low or "lowest compliant" in q_low:
-        row10 = df_matrix[df_matrix["Line #"] == 10].iloc[0]
-        v1_p = row10.get("V1 (Apex)")
-        v2_p = row10.get("V2 (PackTech)")
-        v3_p = row10.get("V3 (Global USD)")
-        v4_p = row10.get("V4 (Balaji)")
-        v5_p = row10.get("V5 (Standard Box)")
-        return (
-            f"### Lowest Compliant Supplier for Line 10 (CP-010 - 7-Ply Heavy-Duty Carton):\n"
-            f"- **Technical Requirement:** 7-ply BCB board with 230/140 GSM.\n"
-            f"- **Vendor 4 (Balaji):** Quoted ₹{v4_p:.2f}, but is **DISQUALIFIED** across all lines due to expired ISO 9001 cert.\n"
-            f"- **Vendor 3 (Global):** **DISQUALIFIED for Line 10** (Failed Gate Q6: lacks in-house 7-ply manufacturing capability).\n"
-            f"- **Vendor 1 (Apex):** Quoted **₹{v1_p:.2f}** (Fully qualified on ISO 9001 and 7-ply).\n"
-            f"- **Vendor 2 (PackTech):** Quoted **₹{v2_p:.2f}**.\n"
-            f"- **Vendor 5 (Standard Box):** Quoted **₹{v5_p:.2f}** (Resolved from FY25 PO).\n\n"
-            f"**Recommendation:** **Vendor 1 (Apex Packaging)** offers the lowest compliant price at **₹{v1_p:.2f}**."
-        )
+            vendor_cols = [c for c in ["V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)"] if c in df_matrix.columns]
+            
+            facts = []
+            unresolved = []
+            missing = []
+            disqualified = []
+            eligible_quotes = []
 
-    if "cost difference" in q_low or "compliance" in q_low or "quality gate" in q_low:
-        cost = scenarios['cost_of_compliance']
-        pct = scenarios['compliance_pct']
-        spend_a = scenarios['spend_a']
-        spend_b = scenarios['spend_b']
-        return (
-            f"### Cost of Compliance Analysis:\n"
-            f"- **Scenario A Spend (Unconstrained L1):** ₹{spend_a:,.0f}\n"
-            f"- **Scenario B Spend (Quality-Gated L1):** ₹{spend_b:,.0f}\n"
-            f"- **Cost of Compliance Premium:** **+₹{cost:,.0f} (+{pct:.2f}%)**\n\n"
-            f"**Strategic Justification:**\n"
-            f"The extra ₹{cost:,.0f} eliminates high operational and supply risk by locking out **Vendor 4 (Sri Balaji Packaging)**, "
-            f"whose ISO 9001:2015 certificate expired in October 2026, monthly capacity is only 280 TPM (below the 300 TPM threshold), "
-            f"and has no certified in-house testing lab."
-        )
+            for vc in vendor_cols:
+                vid = vc.split()[0]
+                val = row.get(vc)
+                cite = row.get(f"{vid} Citation", "No citation")
+                qual = qualifications.get(vid)
 
-    if "risk" in q_low and "v4" in q_low or "balaji" in q_low:
-        return (
-            "### Risk Profile: Vendor 4 (Sri Balaji Packaging Industries)\n"
-            "- **Overall Status:** `DISQUALIFIED`\n"
-            "- **Violations of Mandatory Gates:**\n"
-            "  1. **Q1 (ISO 9001:2015):** Certificate expired in October 2026 (prior to closing date 19-Nov-2026).\n"
-            "  2. **Q2 (Capacity):** Declared capacity is 280 TPM (Threshold: >= 300 TPM).\n"
-            "  3. **Q3 (Testing Lab):** No certified in-house laboratory (relies on third-party labs).\n"
-            "  4. **Q4 (Rejection Rate):** 2.4% historical rejection rate (Threshold: <= 1.5%).\n"
-            "  5. **Q5 (Client References):** Only 2 active clients in FMCG/appliances (Threshold: >= 3).\n"
-            "- **Impact:** Automatically excluded from Scenarios B and C to protect supply chain integrity."
-        )
+                is_globally_dq = qual and qual.status in ["Disqualified", "Pending Review"]
+                is_line_banned = qual and target_line in qual.banned_lines
+                is_unresolved = ("unresolved" in str(cite).lower()) or (vid == "V5" and "unresolved" in str(row.get("V5 Trust Flag", "")).lower())
 
-    # General overview
+                if is_unresolved:
+                    unresolved.append(f"- **{vc}:** `UNRESOLVED` — Citation: {cite}")
+
+                if is_globally_dq:
+                    disqualified.append(f"- **{vc}:** Quoted ₹{val:.2f} if applicable, but **DISQUALIFIED globally** ({qual.reason})")
+                elif is_line_banned:
+                    restr = qual.line_restrictions.get(target_line, "Technical capability constraint")
+                    disqualified.append(f"- **{vc}:** **DISQUALIFIED for Line {target_line}** ({restr})")
+                elif pd.isna(val) or val is None:
+                    if not is_unresolved:
+                        missing.append(f"- **{vc}:** `MISSING / NOT QUOTED` — Citation: {cite}")
+                else:
+                    if not is_unresolved:
+                        facts.append(f"- **{vc}:** **₹{float(val):.2f}** (Confirmed Fact — Citation: {cite})")
+                        eligible_quotes.append((vc, float(val)))
+
+            # Sort eligible
+            eligible_quotes.sort(key=lambda x: x[1])
+
+            out = [f"### Line {target_line} ({code} — {desc}) Analysis\n"]
+            out.append(f"- **Technical Specs:** Annual Qty: {qty:,} | Location: {loc} | Criticality: {crit} | Budget: ₹{budget:.2f}")
+            
+            if facts:
+                out.append("\n**Confirmed Quotations:**\n" + "\n".join(facts))
+            if unresolved:
+                out.append("\n**Unresolved Items (Missing Baseline / Ambiguous):**\n" + "\n".join(unresolved))
+            if missing:
+                out.append("\n**Missing / Not Quoted:**\n" + "\n".join(missing))
+            if disqualified:
+                out.append("\n**Disqualified / Ineligible Vendors:**\n" + "\n".join(disqualified))
+
+            if eligible_quotes:
+                best_v, best_p = eligible_quotes[0]
+                out.append(f"\n**Award Engine Outcome:** Lowest compliant eligible supplier is **{best_v}** at **₹{best_p:.2f}**.")
+            else:
+                out.append(f"\n⚠️ **Award Engine Alert:** Mandatory Line {target_line} is **UNCOVERED**. No compliant eligible vendor has a valid quote.")
+
+            return "\n".join(out)
+
+    # 2. Cost of Compliance & Savings Inquiries
+    if any(k in q_low for k in ["cost difference", "compliance", "quality gate", "savings", "scenario"]):
+        cost = scenarios["cost_of_compliance"]
+        pct = scenarios["compliance_pct"]
+        spend_a = scenarios["spend_a"]
+        spend_b = scenarios["spend_b"]
+        spend_c = scenarios["spend_c"]
+        budget = scenarios["budget_spend"]
+        sav_b = scenarios["savings_b"]
+        sav_pct_b = scenarios["savings_pct_b"]
+        uncovered = scenarios.get("uncovered_lines_b", [])
+
+        out = [
+            "### Live Award Scenarios & Cost of Compliance Breakdown\n",
+            f"- **Master Budget Spend:** **₹{budget:,.0f}**",
+            f"- **Scenario A (Unconstrained L1):** **₹{spend_a:,.0f}** (Saves ₹{scenarios['savings_a']:,.0f} / {scenarios['savings_pct_a']:.2f}%)",
+            f"- **Scenario B (Quality-Gated L1):** **₹{spend_b:,.0f}** (Saves ₹{sav_b:,.0f} / {sav_pct_b:.2f}%)",
+            f"- **Scenario C (Dual Sourcing 70/30):** **₹{spend_c:,.0f}** (Saves ₹{scenarios['savings_c']:,.0f} / {scenarios['savings_pct_c']:.2f}%)",
+            f"- **Cost of Compliance (B vs A):** **+₹{cost:,.0f} (+{pct:.2f}%)**",
+            f"- **Uncovered Lines in Scenario B:** {uncovered if uncovered else 'None (100% Mandatory Coverage Achieved)'}\n",
+            "**Strategic Fact:** The compliance premium of ₹{cost:,.0f} is required to enforce mandatory RFx quality gates "
+            "(excluding uncertified Vendor 4 due to expired ISO 9001 and inadequate 280 TPM capacity). All figures are computed dynamically."
+        ]
+        return "\n".join(out)
+
+    # 3. Vendor-Specific Risk Inquiries (e.g. V4, Balaji, V3, V5, etc.)
+    for vid, vname in [("V4", "balaji"), ("V3", "global"), ("V5", "standard"), ("V1", "apex"), ("V2", "packtech")]:
+        if vid.lower() in q_low or vname in q_low:
+            qual = qualifications.get(vid)
+            if qual:
+                shares = scenarios.get("vendor_shares_b", {}).get(qual.vendor_name, {})
+                spend_val = shares.get("spend", 0.0)
+                share_pct = shares.get("share_pct", 0.0)
+
+                out = [f"### Risk & Qualification Profile: {qual.vendor_name} ({vid})\n"]
+                out.append(f"- **Qualification Status:** `{qual.status}`")
+                out.append(f"- **Award Eligibility:** {'Eligible for award' if qual.passed_mandatory_gates else 'INELIGIBLE across all lines'}")
+                out.append(f"- **Audit Assessment Reason:** {qual.reason}")
+
+                if qual.failed_general_gates:
+                    out.append("\n**Failed Mandatory Gates:**\n" + "\n".join([f"  - {g}" for g in qual.failed_general_gates]))
+                if qual.pending_gates:
+                    out.append("\n**Pending Review Gates:**\n" + "\n".join([f"  - {g}" for g in qual.pending_gates]))
+                if qual.banned_lines:
+                    out.append(f"\n**Restricted / Banned Line Items:** {qual.banned_lines}")
+                    for l, r in qual.line_restrictions.items():
+                        out.append(f"  - Line {l}: {r}")
+
+                out.append(f"\n**Scenario B Award Allocation:** ₹{spend_val:,.0f} ({share_pct:.1f}% of total portfolio)")
+                return "\n".join(out)
+
+    # 4. General Executive Overview (Computed from active state)
     return (
-        f"### Executive Procurement Summary:\n"
-        f"- **Master Budget:** ₹{scenarios['budget_spend']:,.0f}\n"
-        f"- **Scenario B (Recommended Quality-Gated L1):** ₹{scenarios['spend_b']:,.0f} (Net Savings: ₹{scenarios['savings_b']:,.0f} / {scenarios['savings_pct_b']:.2f}%)\n"
-        f"- **Scenario C (Dual Sourced 70/30):** ₹{scenarios['spend_c']:,.0f}\n"
-        f"- **Compliance Premium:** +₹{scenarios['cost_of_compliance']:,.0f} (+{scenarios['compliance_pct']:.2f}%)\n"
-        f"- **Uncovered Lines:** {len(scenarios.get('uncovered_lines_b', []))} lines\n"
-        f"Ask me about specific line items, vendor risks, or overrides for detailed trace evidence!"
+        f"### Executive Procurement Analysis (Live State Connected)\n"
+        f"- **Master Budget Ceiling:** ₹{scenarios['budget_spend']:,.0f}\n"
+        f"- **Recommended Scenario B Spend:** ₹{scenarios['spend_b']:,.0f} (Net Savings: ₹{scenarios['savings_b']:,.0f} / {scenarios['savings_pct_b']:.2f}%)\n"
+        f"- **Scenario C Spend (Dual-Sourced):** ₹{scenarios['spend_c']:,.0f}\n"
+        f"- **Cost of Compliance Premium:** +₹{scenarios['cost_of_compliance']:,.0f} (+{scenarios['compliance_pct']:.2f}%)\n"
+        f"- **Uncovered Mandatory Lines:** {len(scenarios.get('uncovered_lines_b', []))} lines\n"
+        f"- **Active Buyer Overrides:** {len(overrides) if overrides else 0} overridden cells\n\n"
+        f"Ask me about any specific Line # (e.g. 'Line 10' or 'Line 27'), vendor risks (e.g. 'Vendor 4'), "
+        f"or cost of compliance for verified trace evidence."
     )

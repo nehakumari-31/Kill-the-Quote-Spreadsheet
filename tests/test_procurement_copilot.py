@@ -414,12 +414,13 @@ def test_ai_analyst_numerical_answers_match(rfx_data):
         "Description": df_items["Item Description"],
         "Est. Qty": df_norm["Est. Qty"],
         "Criticality": df_items["Criticality (A/B/C)"],
-        "Budget Price": df_norm["Budget Price"],
-        "V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)"
+        "Budget Price": df_norm["Budget Price"]
     })
     for c in ["V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)"]:
-        matrix_df[c] = df_norm[f"{c.split()[0]} Landed ({c.split()[1].strip('()')})"]
-        matrix_df[f"{c.split()[0]} Citation"] = "Ground Truth Citation"
+        v_num = c.split()[0]
+        v_name = c.split(maxsplit=1)[1].strip("()")
+        matrix_df[c] = df_norm[f"{v_num} Landed ({v_name})"]
+        matrix_df[f"{v_num} Citation"] = "Ground Truth Citation"
 
     matrix_df["V5 Trust Flag"] = "Verified"
 
