@@ -169,7 +169,7 @@ FREIGHT_RATES = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. API KEY MANAGEMENT & SECURITY GATE (NO FALLBACKS ALLOWED)
+# 3. SECURE SERVER-SIDE API KEY MANAGEMENT & INITIALIZATION
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("""
@@ -184,35 +184,32 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("### 🔑 Authentication Gate")
-    
-    # Retrieve from secrets or env if present
-    try:
-        secret_key = st.secrets.get("OPENAI_API_KEY", "")
-    except Exception:
-        secret_key = ""
-    env_key = os.getenv("OPENAI_API_KEY", "")
-
-    api_key_input = st.text_input(
-        "Enter LLM API Key",
-        value=secret_key or env_key,
-        type="password",
-        help="Required to execute live Vision extraction, multi-format parsing, and LLM reasoning."
-    )
-
-# Strict Authentication Check: Halt app execution if API key is missing
-if not api_key_input:
-    st.error("⛔ Authentication Required: Missing OpenAI API Key.")
-    st.warning("Please enter your API Key in the sidebar to enable live extraction, Vision OCR, and live AI Analyst reasoning.")
-    st.info("💡 Once your API key is provided, the live document extraction and dynamic reasoning pipeline will initialize automatically.")
-    st.stop()
-
-# Initialize OpenAI Client
+# 1. Read API key from st.secrets or os.getenv (never expose in UI or logs)
+server_api_key = ""
 try:
-    openai_client = OpenAI(api_key=api_key_input)
-except Exception as e:
-    st.error(f"Failed to initialize OpenAI client: {e}")
-    st.stop()
+    if "OPENAI_API_KEY" in st.secrets:
+        server_api_key = str(st.secrets["OPENAI_API_KEY"]).strip()
+    elif hasattr(st.secrets, "get"):
+        server_api_key = str(st.secrets.get("OPENAI_API_KEY", "")).strip()
+except Exception:
+    server_api_key = ""
+
+if not server_api_key:
+    server_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+
+# 2. Secure Server-Side OpenAI Client Initialization
+openai_client = None
+openai_init_error = None
+
+if HAS_OPENAI and server_api_key:
+    try:
+        openai_client = OpenAI(api_key=server_api_key)
+    except Exception as e:
+        openai_init_error = f"OpenAI client initialization failed: {type(e).__name__}"
+elif not HAS_OPENAI:
+    openai_init_error = "OpenAI Python package is not installed."
+else:
+    openai_init_error = "Missing OpenAI API key configuration."
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -351,6 +348,40 @@ def initialize_database():
         st.session_state.messages = []
 
 initialize_database()
+
+
+def get_openai_client_or_status():
+    """
+    Returns (client, error_message).
+    Ensures secure server-side OpenAI client access without exposing secrets.
+    """
+    if openai_client is not None:
+        return openai_client, None
+    if not HAS_OPENAI:
+        return None, "OpenAI Python library is missing in the deployment environment. Ensure 'openai' is listed in requirements.txt."
+    if not server_api_key:
+        return None, (
+            "⚙️ **Administrator Configuration Required**: OpenAI API key is not configured on the server.\n\n"
+            "Please configure `OPENAI_API_KEY` in Streamlit Cloud Secrets (or set the `OPENAI_API_KEY` environment variable in your server environment)."
+        )
+    return None, f"OpenAI client is unavailable: {openai_init_error or 'Unknown initialization error'}."
+
+
+def format_openai_api_error(e: Exception) -> str:
+    """Provides human-readable diagnostic messages for OpenAI API errors without exposing credentials."""
+    err_str = str(e)
+    err_type = type(e).__name__
+    
+    # Common OpenAI API error categories
+    if "AuthenticationError" in err_type or "invalid_api_key" in err_str or "401" in err_str:
+        return "Authentication Error: The configured OpenAI API key is invalid or revoked. Please verify the `OPENAI_API_KEY` secret."
+    if "RateLimitError" in err_type or "insufficient_quota" in err_str or "quota" in err_str.lower() or "429" in err_str:
+        return "API Quota / Rate Limit Exceeded: OpenAI quota exhausted or rate limit reached. Please check your OpenAI account billing and usage limits."
+    if "APIConnectionError" in err_type or "Timeout" in err_type or "503" in err_str or "502" in err_str:
+        return "Service Connectivity Error: Unable to reach the OpenAI API service. Please verify network access or try again shortly."
+    if "NotFoundError" in err_type or "model_not_found" in err_str:
+        return "Model Unavailable: Requested model is not accessible with the current OpenAI API key/tier."
+    return f"OpenAI Service Notice: {err_type} - {err_str}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -609,47 +640,53 @@ with st.sidebar:
 # 9. EXECUTE LIVE EXTRACTION (IF FILES UPLOADED)
 # ─────────────────────────────────────────────────────────────────────────────
 if uploaded_files:
-    if "processed_files" not in st.session_state:
-        st.session_state.processed_files = set()
+    active_client, client_err = get_openai_client_or_status()
+    if not active_client:
+        st.error(client_err)
+        st.info("ℹ️ Live document extraction and Vision OCR require a valid server-side OpenAI API key.")
+    else:
+        if "processed_files" not in st.session_state:
+            st.session_state.processed_files = set()
 
-    for up_file in uploaded_files:
-        if up_file.name not in st.session_state.processed_files:
-            with st.spinner(f"Extracting live data from {up_file.name} using Vision/LLM..."):
-                try:
-                    quotes_extracted = extract_vendor_quote(up_file, openai_client)
-                    
-                    # Merge extracted quotes into st.session_state.df_norm
-                    count = 0
-                    for q in quotes_extracted:
-                        l_item = q.get("line_item")
-                        p_val = q.get("price")
-                        u_str = q.get("unit", "Nos")
-                        src_cite = q.get("source_citation", f"Extracted from {up_file.name}")
+        for up_file in uploaded_files:
+            if up_file.name not in st.session_state.processed_files:
+                with st.spinner(f"Extracting live data from {up_file.name} using Vision/LLM..."):
+                    try:
+                        quotes_extracted = extract_vendor_quote(up_file, active_client)
+                        
+                        # Merge extracted quotes into st.session_state.df_norm
+                        count = 0
+                        for q in quotes_extracted:
+                            l_item = q.get("line_item")
+                            p_val = q.get("price")
+                            u_str = q.get("unit", "Nos")
+                            src_cite = q.get("source_citation", f"Extracted from {up_file.name}")
 
-                        if l_item and l_item in st.session_state.df_norm["Line #"].values:
-                            row_idx = st.session_state.df_norm["Line #"] == l_item
-                            d_loc = st.session_state.df_norm.loc[row_idx, "Delivery Location"].values[0]
-                            c_wt = st.session_state.df_norm.loc[row_idx, "Est. Wt (kg)"].values[0]
-                            is_new = l_item in [25, 27, 28, 29, 30]
+                            if l_item and l_item in st.session_state.df_norm["Line #"].values:
+                                row_idx = st.session_state.df_norm["Line #"] == l_item
+                                d_loc = st.session_state.df_norm.loc[row_idx, "Delivery Location"].values[0]
+                                c_wt = st.session_state.df_norm.loc[row_idx, "Est. Wt (kg)"].values[0]
+                                is_new = l_item in [25, 27, 28, 29, 30]
 
-                            landed, flag, cite = normalize_extracted_quote(
-                                f"{p_val} {u_str}" if p_val is not None else u_str,
-                                l_item, d_loc, c_wt, is_new
-                            )
+                                landed, flag, cite = normalize_extracted_quote(
+                                    f"{p_val} {u_str}" if p_val is not None else u_str,
+                                    l_item, d_loc, c_wt, is_new
+                                )
 
-                            st.session_state.df_norm.loc[row_idx, vendor_target] = landed
-                            cite_col = f"{vendor_target.split()[0]} Citation"
-                            if cite_col in st.session_state.df_norm.columns:
-                                st.session_state.df_norm.loc[row_idx, cite_col] = f"{src_cite} -> {cite}"
-                            if vendor_target == "V5 (Standard Box)":
-                                st.session_state.df_norm.loc[row_idx, "V5 Trust Flag"] = flag
+                                st.session_state.df_norm.loc[row_idx, vendor_target] = landed
+                                cite_col = f"{vendor_target.split()[0]} Citation"
+                                if cite_col in st.session_state.df_norm.columns:
+                                    st.session_state.df_norm.loc[row_idx, cite_col] = f"{src_cite} -> {cite}"
+                                if vendor_target == "V5 (Standard Box)":
+                                    st.session_state.df_norm.loc[row_idx, "V5 Trust Flag"] = flag
 
-                            count += 1
+                                count += 1
 
-                    st.session_state.processed_files.add(up_file.name)
-                    st.success(f"Live Extracted {count} line items from {up_file.name} into {vendor_target}!")
-                except Exception as e:
-                    st.error(f"Live extraction error on {up_file.name}: {e}")
+                        st.session_state.processed_files.add(up_file.name)
+                        st.success(f"Live Extracted {count} line items from {up_file.name} into {vendor_target}!")
+                    except Exception as e:
+                        diag_msg = format_openai_api_error(e)
+                        st.error(f"Live extraction error on {up_file.name}: {diag_msg}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1056,16 +1093,22 @@ elif nav == "💬 AI Procurement Analyst (Live LLM)":
         with st.chat_message("user"):
             st.markdown(user_query)
 
-        # Inject LIVE state of edited_df into LLM context
-        matrix_context = st.session_state.df_norm[[
-            "Line #", "Item Code", "Description", "Est. Qty", "Delivery Location", "Criticality",
-            "V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)",
-            "V1 Citation", "V2 Citation", "V3 Citation", "V4 Citation", "V5 Citation", "V5 Trust Flag"
-        ]].to_markdown(index=False)
+        active_client, client_err = get_openai_client_or_status()
+        if not active_client:
+            with st.chat_message("assistant"):
+                st.warning(client_err)
+                st.session_state.messages.append({"role": "assistant", "content": client_err})
+        else:
+            # Inject LIVE state of edited_df into LLM context
+            matrix_context = st.session_state.df_norm[[
+                "Line #", "Item Code", "Description", "Est. Qty", "Delivery Location", "Criticality",
+                "V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)",
+                "V1 Citation", "V2 Citation", "V3 Citation", "V4 Citation", "V5 Citation", "V5 Trust Flag"
+            ]].to_markdown(index=False)
 
-        audit_context = st.session_state.df_gate.to_markdown(index=False)
+            audit_context = st.session_state.df_gate.to_markdown(index=False)
 
-        system_instruction = f"""You are the AI Procurement Analyst co-pilot for RFx-CORR-2026-017.
+            system_instruction = f"""You are the AI Procurement Analyst co-pilot for RFx-CORR-2026-017.
 You are directly connected to the active normalized matrix and Questionnaire Audit database.
 
 --- LIVE DATA CONTEXT ---
@@ -1089,20 +1132,21 @@ LIVE SCENARIO SPENDS (PANDAS CALCULATED):
 4. Keep responses concise, high-trust, and executive-ready.
 """
 
-        with st.chat_message("assistant"):
-            with st.spinner("AI Analyst executing live reasoning over current screen data..."):
-                try:
-                    completion = openai_client.chat.completions.create(
-                        model="gpt-4o",
-                        messages=[
-                            {"role": "system", "content": system_instruction},
-                            {"role": "user", "content": user_query}
-                        ],
-                        temperature=0.1
-                    )
-                    response_text = completion.choices[0].message.content
-                except Exception as e:
-                    response_text = f"⚠️ OpenAI API Error: {e}"
+            with st.chat_message("assistant"):
+                with st.spinner("AI Analyst executing live reasoning over current screen data..."):
+                    try:
+                        completion = active_client.chat.completions.create(
+                            model="gpt-4o",
+                            messages=[
+                                {"role": "system", "content": system_instruction},
+                                {"role": "user", "content": user_query}
+                            ],
+                            temperature=0.1
+                        )
+                        response_text = completion.choices[0].message.content
+                    except Exception as e:
+                        diag_msg = format_openai_api_error(e)
+                        response_text = f"⚠️ OpenAI Service Error: {diag_msg}"
 
-                st.markdown(response_text)
-                st.session_state.messages.append({"role": "assistant", "content": response_text})
+                    st.markdown(response_text)
+                    st.session_state.messages.append({"role": "assistant", "content": response_text})
