@@ -1,0 +1,87 @@
+"""
+Data models and schemas for procurement entities.
+"""
+
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any
+from datetime import datetime
+
+@dataclass
+class ExtractedField:
+    """Represents a single extracted data field with full audit traceability."""
+    line_item: int
+    item_code: str
+    price: Optional[float]
+    unit: str
+    currency: str
+    source_reference: str  # e.g. "Sheet 'Commercial Quote', Row 2, Col D"
+    confidence_score: float  # 0.0 to 1.0
+    extraction_status: str  # "Verified" | "Needs Review" | "Missing"
+    original_raw_text: str  # exact snippet from quotation document
+    notes: Optional[str] = None
+
+@dataclass
+class QuotationMetadata:
+    """Metadata for an uploaded or parsed vendor quotation document."""
+    vendor_id: str
+    vendor_name: str
+    filename: str
+    format: str
+    quote_ref: Optional[str] = None
+    quote_date: Optional[str] = None
+    currency: str = "INR"
+    payment_terms: Optional[str] = None
+    delivery_terms: Optional[str] = None
+    freight_terms: Optional[str] = None
+    validity_days: Optional[int] = 30
+    gst_terms: Optional[str] = "18% extra"
+    extraction_mode: str = "Live OCR/LLM"
+    fields: List[ExtractedField] = field(default_factory=list)
+
+@dataclass
+class LineItemSpec:
+    """Technical specification for an RFx line item."""
+    line_no: int
+    item_code: str
+    description: str
+    sub_category: str
+    style: str
+    ply: float
+    flute: str
+    liner_gsm: float
+    fluting_gsm: float
+    board_l_mm: float
+    board_w_mm: float
+    uom: str
+    est_annual_qty: int
+    delivery_location: str
+    criticality: str
+    budget_unit_price: float
+    composite_gsm: float
+    est_weight_kg: float
+    last_po_price: Optional[float] = None
+    is_new_sku: bool = False
+
+@dataclass
+class VendorQualification:
+    """Qualification status and audit log for a vendor."""
+    vendor_id: str
+    vendor_name: str
+    status: str  # "Eligible" | "Conditionally Eligible" | "Disqualified" | "Pending Review"
+    passed_mandatory_gates: bool
+    failed_general_gates: List[str] = field(default_factory=list)
+    banned_lines: List[int] = field(default_factory=list)
+    evidence: Dict[str, str] = field(default_factory=dict)
+    reason: str = ""
+
+@dataclass
+class BuyerOverrideRecord:
+    """Audit log entry for a human-in-the-loop buyer override."""
+    line_no: int
+    item_code: str
+    vendor_col: str
+    original_value: Any
+    corrected_value: Any
+    reason: str
+    timestamp: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    source_reference: str = "Manual Buyer Override"
