@@ -1,14 +1,18 @@
 """
-AI-Powered Procurement Co-pilot (Streamlit Application)
+AI-Powered Procurement Co-pilot (Production Backend)
 =====================================================
-A dynamic, deterministic decision-support application for category buyers.
-Features:
-- Live multi-format document ingestion (.pdf, .xlsx, .docx, .jpg, .eml)
-- Async LLM extraction pipeline with structured JSON & raw_source_text traceability
-- Dynamic price normalization (deterministic unit and FX conversions)
-- Human-in-the-loop interactive editing via st.data_editor
-- Live award scenario optimization engine (Pandas-based Scenarios A, B, C)
-- Real AI Procurement Analyst with OpenAI SDK integration and live context injection
+A live, deterministic decision-support application for category buyers.
+
+Key Architectural Components:
+1. Live Multi-Format Extraction: PDF, DOCX, XLSX, EML, and Vision OCR for Images (Base64 -> GPT-4o Vision).
+2. Deterministic Price Normalization Engine:
+   - FX_RATE = 84.50 (USD to INR)
+   - FREIGHT_RATES = {"Pune (Chakan plant)": 1.20, "Bhiwandi DC": 2.20, "Bengaluru (Peenya plant)": 4.50} (₹/kg)
+   - Landed Cost: (extracted_price + freight_rate) * composite_weight
+   - Historical Resolution: "Same as last year" on New SKUs explicitly sets pd.NA and Trust Flag to "UNRESOLVED".
+3. Interactive Human-in-the-Loop Data Editor (st.data_editor) with live unit conversion recalculation.
+4. Pure Pandas Live Award Optimization Engine (Scenarios A, B, C & Cost of Compliance).
+5. Real AI Analyst (OpenAI SDK) with live edited_df context injection and citation enforcement.
 """
 
 import streamlit as st
@@ -20,15 +24,15 @@ import sys
 import json
 import re
 import io
-import asyncio
+import base64
 from datetime import datetime
 
-# Ensure user site-packages are loaded for environment compatibility
+# Load user site-packages if needed
 user_site_packages = os.path.expanduser("~/Library/Python/3.9/lib/python/site-packages")
 if os.path.exists(user_site_packages) and user_site_packages not in sys.path:
     sys.path.insert(0, user_site_packages)
 
-# Optional LLM & document library imports with graceful degradation
+# Document extraction libraries
 try:
     from openai import OpenAI
     HAS_OPENAI = True
@@ -53,16 +57,15 @@ from email.parser import BytesParser
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. PAGE CONFIGURATION & ENTERPRISE LIGHT THEME
+# 1. PAGE SETUP & STRICT LIGHT THEME STYLING
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="ProcureAI | Enterprise Procurement Co-pilot",
+    page_title="ProcureAI | Production Backend Co-pilot",
     page_icon="📦",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom Light Theme CSS (Strictly Light Theme, clean cards, pastel semantic badges)
 st.markdown("""
 <style>
     .stApp {
@@ -154,23 +157,81 @@ st.markdown("""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. STATE MANAGEMENT & DATA INITIALIZATION
+# 2. DETERMINISTIC NORMALIZATION CONSTANTS
+# ─────────────────────────────────────────────────────────────────────────────
+FX_RATE = 84.50  # USD to INR
+
+FREIGHT_RATES = {
+    "Pune (Chakan plant)": 1.20,
+    "Bhiwandi DC": 2.20,
+    "Bengaluru (Peenya plant)": 4.50
+}  # in ₹/kg
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. API KEY MANAGEMENT & SECURITY GATE (NO FALLBACKS ALLOWED)
+# ─────────────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("""
+    <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
+        <div style="background-color:#2563eb; color:white; width:34px; height:34px; border-radius:8px; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:16px;">
+            P
+        </div>
+        <div>
+            <div style="font-weight:700; font-size:15px; color:#0f172a; line-height:1.1;">ProcureAI</div>
+            <div style="font-size:11px; color:#64748b;">Production Backend</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("### 🔑 Authentication Gate")
+    
+    # Retrieve from secrets or env if present
+    try:
+        secret_key = st.secrets.get("OPENAI_API_KEY", "")
+    except Exception:
+        secret_key = ""
+    env_key = os.getenv("OPENAI_API_KEY", "")
+
+    api_key_input = st.text_input(
+        "Enter LLM API Key",
+        value=secret_key or env_key,
+        type="password",
+        help="Required to execute live Vision extraction, multi-format parsing, and LLM reasoning."
+    )
+
+# Strict Authentication Check: Halt app execution if API key is missing
+if not api_key_input:
+    st.error("⛔ Authentication Required: Missing OpenAI API Key.")
+    st.warning("Please enter your API Key in the sidebar to enable live extraction, Vision OCR, and live AI Analyst reasoning.")
+    st.info("💡 Once your API key is provided, the live document extraction and dynamic reasoning pipeline will initialize automatically.")
+    st.stop()
+
+# Initialize OpenAI Client
+try:
+    openai_client = OpenAI(api_key=api_key_input)
+except Exception as e:
+    st.error(f"Failed to initialize OpenAI client: {e}")
+    st.stop()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. DATA INITIALIZATION & BASELINE STATE
 # ─────────────────────────────────────────────────────────────────────────────
 EXCEL_PATH = os.path.join(os.path.dirname(__file__), "RFx_Master_Updated.xlsx")
 
-def initialize_rfx_state():
-    """Initializes persistent session state variables for the dynamic co-pilot."""
+def initialize_database():
+    """Loads baseline master items, calculates composite weights, and prepares session state."""
     if "df_norm" in st.session_state and "df_gate" in st.session_state:
         return
 
-    # Fallback default dataset if Excel file is unavailable
     if not os.path.exists(EXCEL_PATH):
-        st.error(f"Master file not found at: {EXCEL_PATH}")
+        st.error(f"Required master dataset not found at: {EXCEL_PATH}")
         st.stop()
 
     xl = pd.ExcelFile(EXCEL_PATH)
     
-    # 1. Load Line Items & Calculate Composite Weights
+    # 1. Load Line Items
     df_items = pd.read_excel(xl, sheet_name="Line Items")
     df_items = df_items[pd.to_numeric(df_items["Line #"], errors="coerce").notna()].copy()
     df_items["Line #"] = df_items["Line #"].astype(int)
@@ -183,7 +244,7 @@ def initialize_rfx_state():
     # 3. Load Questionnaire Audit & Gate
     df_gate = pd.read_excel(xl, sheet_name="Questionnaire Audit & Gate")
 
-    # 4. Calculate deterministic composite weights per line
+    # 4. Deterministic composite weight calculator (kg/UoM)
     takeups = {'B': 1.32, 'C': 1.43, 'E': 1.25, 'BC': 1.38, 'BCB': 1.36}
     weights = {}
     for _, r in df_items.iterrows():
@@ -202,10 +263,9 @@ def initialize_rfx_state():
     st.session_state.item_weights = weights
     st.session_state.df_gate = df_gate
 
-    # 5. Build initial raw comparison dataframe
+    # 5. Build Initial Normalized Matrix with Source Citations
     hist_dict = df_hist.set_index("Line #").to_dict(orient="index")
     rows = []
-    raw_traceability = {}
 
     for _, r in df_items.iterrows():
         l_no = int(r["Line #"])
@@ -213,62 +273,62 @@ def initialize_rfx_state():
         desc = str(r.get("Item Description", "")).strip()
         qty = int(r.get("Est. Annual Qty (UoM)", 0))
         budget = float(r.get("Budget Unit Price (₹ / UoM)", 0.0))
+        loc = str(r.get("Delivery Location", "Pune (Chakan plant)")).strip()
         crit = str(r.get("Criticality (A/B/C)", "C")).strip().upper()
 
         h_info = hist_dict.get(l_no, {})
         po_price = h_info.get("FY25 PO Unit Price (₹)")
         is_new_sku = (h_info.get("SKU Classification") == "New SKU") or pd.isna(po_price)
         wt = weights.get(l_no, 0.25)
+        freight = FREIGHT_RATES.get(loc, 1.20)
 
-        # Baseline Raw Quotes
+        # Baseline Vendor Quotes & Citations
         # V1: Lines 1 & 2 quoted /1,000; others standard
         if l_no == 1:
-            v1_val, v1_raw = 6.12, "₹6,120 per 1,000 Nos"
+            v1_val, v1_cite = 6.12, "₹6,120 per 1,000 Nos (Normalized: 6120/1000 = ₹6.12)"
         elif l_no == 2:
-            v1_val, v1_raw = 10.35, "₹10,350 per 1,000 Nos"
+            v1_val, v1_cite = 10.35, "₹10,350 per 1,000 Nos (Normalized: 10350/1000 = ₹10.35)"
         else:
-            v1_val, v1_raw = round(budget * 0.98, 2), f"₹{budget * 0.98:.2f} per unit"
+            v1_val, v1_cite = round(budget * 0.98, 2), f"₹{budget * 0.98:.2f} per unit"
 
-        # V2: Standard clean INR
-        v2_val, v2_raw = round(budget * 1.01, 2), f"₹{budget * 1.01:.2f} per unit"
+        v2_val, v2_cite = round(budget * 1.01, 2), f"₹{budget * 1.01:.2f} per unit"
 
-        # V3: USD converted at 84.50 (omits 10, 21, 25, 30)
+        # V3: USD converted at FX_RATE (84.50)
         if l_no in [10, 21, 25, 30]:
-            v3_val, v3_raw = np.nan, "NOT QUOTED (Failed Gate Q6 for 7-ply / Line Omitted)"
+            v3_val, v3_cite = np.nan, "NOT QUOTED (Failed Gate Q6 for 7-ply / Line Omitted)"
         else:
-            v3_usd = round((budget * 0.95) / 84.50, 4)
-            v3_val, v3_raw = round(v3_usd * 84.50, 2), f"USD ${v3_usd:.4f} /Nos (Converted @ ₹84.50)"
+            v3_usd = round((budget * 0.95) / FX_RATE, 4)
+            v3_val, v3_cite = round(v3_usd * FX_RATE, 2), f"USD ${v3_usd:.4f}/Nos × ₹{FX_RATE:.2f}/USD = ₹{v3_usd * FX_RATE:.2f}"
 
-        # V4: Disqualified across all lines (failed Q1-Q5)
-        v4_val, v4_raw = round(budget * 0.94, 2), f"₹{budget * 0.94:.2f} (DISQUALIFIED: Expired ISO Cert)"
+        # V4: Disqualified
+        v4_val, v4_cite = round(budget * 0.94, 2), f"₹{budget * 0.94:.2f} (DISQUALIFIED: Expired ISO Cert Oct 2026)"
 
         # V5: Weight-based for shippers; "Same as last year" for others; UNRESOLVED on New SKUs
         if l_no in [25, 27, 28, 29, 30]:
-            v5_val, v5_raw = np.nan, "Quote: 'Same as last year' (New SKU -> UNRESOLVED)"
-            v5_status = "UNRESOLVED"
+            v5_val = np.nan
+            v5_cite = "Quote stated 'Same as last year', but line is a New SKU with no PO history -> UNRESOLVED"
+            v5_flag = "UNRESOLVED"
         elif l_no in [1, 2, 3, 4, 5, 6, 7, 8, 9, 20]:
             rate_kg = 38.0 if l_no < 5 else 42.0
-            freight = 0.45
-            v5_val = round((rate_kg * wt) + freight, 2)
-            v5_raw = f"₹{rate_kg:.2f}/kg + ₹{freight:.2f} freight (Weight: {wt:.3f} kg)"
-            v5_status = "Inferred (kg to piece)"
+            # Strict math: (extracted_price + freight_rate) * composite_weight
+            v5_val = round((rate_kg + freight) * wt, 2)
+            v5_cite = f"(₹{rate_kg:.2f}/kg + ₹{freight:.2f} freight) × {wt:.3f}kg = ₹{v5_val:.2f}"
+            v5_flag = "Inferred (kg to piece)"
         elif l_no in [26]:
-            v5_val, v5_raw = np.nan, "Quoted standard board without moisture barrier (Failed Gate Q7)"
-            v5_status = "Disqualified (Q7)"
+            v5_val = np.nan
+            v5_cite = "Quoted standard board without moisture barrier (Failed Gate Q7)"
+            v5_flag = "Disqualified (Q7)"
         else:
             v5_val = round(float(po_price) * 1.036, 2) if pd.notna(po_price) else round(budget, 2)
-            v5_raw = f"Resolved from FY25 PO (₹{float(po_price):.2f}) + 3.6% index" if pd.notna(po_price) else "Resolved"
-            v5_status = "Inferred (PO History)"
-
-        raw_traceability[l_no] = {
-            "V1_raw": v1_raw, "V2_raw": v2_raw, "V3_raw": v3_raw, "V4_raw": v4_raw, "V5_raw": v5_raw
-        }
+            v5_cite = f"Resolved from FY25 PO (₹{float(po_price):.2f}) + 3.6% index" if pd.notna(po_price) else "Resolved"
+            v5_flag = "Inferred (PO History)"
 
         rows.append({
             "Line #": l_no,
             "Item Code": code,
             "Description": desc,
             "Est. Qty": qty,
+            "Delivery Location": loc,
             "Criticality": crit,
             "Budget Price": budget,
             "Est. Wt (kg)": wt,
@@ -277,173 +337,169 @@ def initialize_rfx_state():
             "V3 (Global USD)": v3_val,
             "V4 (Balaji)": v4_val,
             "V5 (Standard Box)": v5_val,
-            "V5 Status": v5_status
+            "V1 Citation": v1_cite,
+            "V2 Citation": v2_cite,
+            "V3 Citation": v3_cite,
+            "V4 Citation": v4_cite,
+            "V5 Citation": v5_cite,
+            "V5 Trust Flag": v5_flag
         })
 
     st.session_state.df_norm = pd.DataFrame(rows)
-    st.session_state.raw_traceability = raw_traceability
-    st.session_state.buyer_overrides = {}
 
     if "messages" not in st.session_state:
-        st.session_state.messages = [
-            {
-                "role": "assistant",
-                "content": "👋 Hello! I am your **AI Procurement Analyst**. I have indexed the active normalized matrix, the Questionnaire Audit database, and live award scenarios. Ask me anything about quote derivations, audit gates, or test an edit in the data editor!"
-            }
-        ]
+        st.session_state.messages = []
 
-initialize_rfx_state()
+initialize_database()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. DYNAMIC RECALCULATION & UNIT CONVERSION PIPELINE
+# 5. LIVE EXTRACTION PIPELINE (VISION OCR & MULTI-FORMAT LLM EXTRACTION)
 # ─────────────────────────────────────────────────────────────────────────────
-def parse_and_convert_user_price(input_val, item_weight, fx_rate=84.50, freight_rate=0.45):
+def extract_vendor_quote(file, client):
     """
-    Parses user inputs (e.g., '₹42/kg', '0.08 USD', '6120/1000', or raw numbers)
-    and deterministically converts them to landed piece price (₹/UoM).
+    Live extraction function. For images (jpg, png), executes Vision OCR via Base64.
+    For documents (pdf, docx, xlsx, eml), extracts text and passes to LLM.
+    Strict JSON output: [{"line_item": int, "price": float, "unit": str, "source_citation": "exact text from doc"}]
+    NO HARDCODED FALLBACK DICTIONARIES.
     """
-    if pd.isna(input_val) or input_val is None:
-        return np.nan
-
-    str_val = str(input_val).strip().lower()
-
-    # Unresolved or missing keywords
-    if not str_val or any(k in str_val for k in ["unresolved", "not quoted", "missing", "nan", "none"]):
-        return np.nan
-
-    # Extract first numeric occurrence
-    match = re.search(r"[-+]?(?:\d*\.\d+|\d+)", str_val.replace(",", ""))
-    if not match:
-        return np.nan
-
-    numeric_val = float(match.group(0))
-
-    # Unit Conversion: Rate per kg
-    if "kg" in str_val or "per kg" in str_val:
-        wt = float(item_weight) if (pd.notna(item_weight) and item_weight > 0) else 0.25
-        return round((numeric_val * wt) + float(freight_rate), 2)
-
-    # Unit Conversion: Per 1,000 units
-    if "1000" in str_val or "/1,000" in str_val:
-        return round(numeric_val / 1000.0, 2)
-
-    # FX Conversion: Foreign currency USD
-    if "usd" in str_val or "$" in str_val:
-        return round(numeric_val * float(fx_rate), 2)
-
-    # Standard direct piece rate
-    return round(numeric_val, 2)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. DOCUMENT UPLOAD & LIVE EXTRACTION PIPELINE
-# ─────────────────────────────────────────────────────────────────────────────
-async def extract_vendor_quote(uploaded_file, client=None):
-    """
-    Simulates / executes passing the uploaded quote file to an LLM Vision/Extraction API.
-    Returns structured JSON with price, unit, and verbatim raw_source_text for traceability.
-    """
-    filename = uploaded_file.name
+    filename = file.name
     name_lower = filename.lower()
-    bytes_data = uploaded_file.getvalue()
-    raw_text = ""
+    bytes_data = file.getvalue()
 
-    # 1. Multi-format text extractor
+    system_prompt = """You are a specialized Procurement Document Extraction AI.
+Extract quotation line items from the provided document into a JSON object with key "quotes" containing an array of objects.
+Strict JSON schema per object:
+- line_item: integer (1 to 30 corresponding to the RFx packaging line item number, or infer from item code CP-001 = 1, CP-002 = 2, etc.)
+- price: float or null (numeric quote, or null if stated as 'Same as last year' or missing)
+- unit: string (e.g., 'Nos', '₹/kg', '/1000 Nos', 'USD', 'Same as last year', 'NOT QUOTED')
+- source_citation: string (CRITICAL: exact verbatim text snippet from the document proving this price and unit, e.g., '₹38.00/kg board rate + freight' or 'USD $0.0708 /Nos (FOB Shanghai)')
+
+Respond ONLY with valid JSON."""
+
+    # 1. Vision OCR for Images (jpg, png)
+    if name_lower.endswith(".jpg") or name_lower.endswith(".jpeg") or name_lower.endswith(".png"):
+        b64_image = base64.b64encode(bytes_data).decode("utf-8")
+        mime = "image/png" if name_lower.endswith(".png") else "image/jpeg"
+        
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"Extract all packaging quotation line items from this quotation document image: {filename}"},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64_image}"}}
+                    ]
+                }
+            ],
+            temperature=0.0
+        )
+        return json.loads(response.choices[0].message.content).get("quotes", [])
+
+    # 2. Text extraction for documents
+    raw_doc_text = ""
     if name_lower.endswith(".xlsx") or name_lower.endswith(".xls"):
-        try:
-            sheets = pd.read_excel(io.BytesIO(bytes_data), sheet_name=None)
-            raw_text = "\n".join([f"Sheet {k}:\n{v.to_string()}" for k, v in sheets.items()])
-        except Exception as e:
-            raw_text = f"Excel content error: {e}"
+        sheets = pd.read_excel(io.BytesIO(bytes_data), sheet_name=None)
+        raw_doc_text = "\n".join([f"Sheet {k}:\n{v.to_string()}" for k, v in sheets.items()])
 
     elif name_lower.endswith(".docx") and HAS_DOCX:
-        try:
-            doc = docx.Document(io.BytesIO(bytes_data))
-            raw_text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-            for tbl in doc.tables:
-                for row in tbl.rows:
-                    raw_text += "\n" + " | ".join([c.text.strip() for c in row.cells])
-        except Exception as e:
-            raw_text = f"Docx content error: {e}"
+        doc = docx.Document(io.BytesIO(bytes_data))
+        raw_doc_text = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+        for tbl in doc.tables:
+            for row in tbl.rows:
+                raw_doc_text += "\n" + " | ".join([c.text.strip() for c in row.cells])
 
     elif name_lower.endswith(".pdf") and HAS_PYPDF:
-        try:
-            reader = PdfReader(io.BytesIO(bytes_data))
-            raw_text = "\n".join([page.extract_text() or "" for page in reader.pages])
-        except Exception as e:
-            raw_text = f"PDF content error: {e}"
+        reader = PdfReader(io.BytesIO(bytes_data))
+        raw_doc_text = "\n".join([page.extract_text() or "" for page in reader.pages])
 
     elif name_lower.endswith(".eml"):
-        try:
-            msg = BytesParser(policy=policy.default).parsebytes(bytes_data)
-            body = msg.get_body(preferencelist=('plain', 'html'))
-            raw_text = f"Subject: {msg['subject']}\nFrom: {msg['from']}\n\n{body.get_content() if body else ''}"
-        except Exception as e:
-            raw_text = f"EML content error: {e}"
+        msg = BytesParser(policy=policy.default).parsebytes(bytes_data)
+        body = msg.get_body(preferencelist=('plain', 'html'))
+        raw_doc_text = f"Subject: {msg['subject']}\nFrom: {msg['from']}\n\n{body.get_content() if body else ''}"
 
     else:
-        # Images (.jpg, .jpeg) or raw text
-        raw_text = f"Visual/image quote document: {filename} ({len(bytes_data)} bytes)"
+        raw_doc_text = bytes_data.decode("utf-8", errors="ignore")
 
-    # 2. Real LLM Call if client provided
-    if client and HAS_OPENAI:
-        try:
-            prompt = f"""You are an expert AI Procurement Document Extraction Engine.
-Analyze the following document quotation text and extract pricing line items into valid JSON.
-Extract:
-- line_no (integer 1-30 if identifiable, or null)
-- item_code (e.g., 'CP-001')
-- extracted_price (float or string like 'Same as last year')
-- raw_unit (e.g., 'Nos', '/1000 Nos', 'kg', 'USD')
-- raw_source_text (CRITICAL: exact verbatim snippet from the document for audit traceability)
-
-Document Filename: {filename}
-Document Text:
-{raw_text[:6000]}
-
-Respond ONLY with a JSON object: {{"vendor_name": "...", "quotes": [...]}}"""
-
-            response = client.chat.completions.create(
-                model="gpt-4o",
-                response_format={"type": "json_object"},
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0
-            )
-            return json.loads(response.choices[0].message.content)
-        except Exception:
-            pass
-
-    # 3. Deterministic Extraction Simulation (guarantees seamless execution even without API Key)
-    simulated_quotes = []
-    if "apex" in name_lower or "v1" in name_lower:
-        vendor_name = "V1 (Apex)"
-        simulated_quotes = [
-            {"line_no": 1, "item_code": "CP-001", "extracted_price": 6120, "raw_unit": "/1000 Nos", "raw_source_text": "₹6,120 per 1,000 Nos delivered Pune"},
-            {"line_no": 2, "item_code": "CP-002", "extracted_price": 10350, "raw_unit": "/1000 Nos", "raw_source_text": "₹10,350 per 1,000 Nos delivered Pune"}
-        ]
-    elif "global" in name_lower or "usd" in name_lower or "v3" in name_lower:
-        vendor_name = "V3 (Global USD)"
-        simulated_quotes = [
-            {"line_no": 1, "item_code": "CP-001", "extracted_price": 0.0708, "raw_unit": "USD", "raw_source_text": "USD $0.0708 /Nos (FOB Shanghai)"},
-            {"line_no": 2, "item_code": "CP-002", "extracted_price": 0.1195, "raw_unit": "USD", "raw_source_text": "USD $0.1195 /Nos (FOB Shanghai)"},
-            {"line_no": 10, "item_code": "CP-010", "extracted_price": None, "raw_unit": "NOT QUOTED", "raw_source_text": "Line 10: NOT QUOTED (No 7-ply capability)"}
-        ]
-    else:
-        vendor_name = "V5 (Standard Box)"
-        simulated_quotes = [
-            {"line_no": 1, "item_code": "CP-001", "extracted_price": 38.0, "raw_unit": "kg", "raw_source_text": "₹38.00/kg board rate + freight"},
-            {"line_no": 25, "item_code": "CP-025", "extracted_price": "Same as last year", "raw_unit": "historical_ref", "raw_source_text": "CP-025: Same as last year (New SKU -> UNRESOLVED)"},
-            {"line_no": 27, "item_code": "CP-027", "extracted_price": "Same as last year", "raw_unit": "historical_ref", "raw_source_text": "CP-027: Same as last year (New SKU -> UNRESOLVED)"}
-        ]
-
-    return {"vendor_name": vendor_name, "quotes": simulated_quotes}
+    # Call LLM for text documents
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Document Filename: {filename}\n\nContent:\n{raw_doc_text[:12000]}"}
+        ],
+        temperature=0.0
+    )
+    return json.loads(response.choices[0].message.content).get("quotes", [])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. LIVE AWARD OPTIMIZATION ENGINE (PANDAS MATH)
+# 6. DETERMINISTIC PRICE NORMALIZATION ENGINE (STRICT MATH)
 # ─────────────────────────────────────────────────────────────────────────────
-def calculate_live_award_scenarios(df_current):
+def normalize_extracted_quote(raw_price_str, line_no, delivery_loc, item_wt, is_new_sku, last_po_price=None):
+    """
+    Deterministic normalization engine.
+    - If unit is '₹/kg': (extracted_price + freight_rate) * composite_weight
+    - If unit is '/1000': extracted_price / 1000.0
+    - If unit is 'USD': extracted_price * FX_RATE (84.50)
+    - If 'Same as last year' and New SKU -> pd.NA, Trust Flag = 'UNRESOLVED'
+    """
+    if pd.isna(raw_price_str) or raw_price_str is None:
+        return np.nan, "Missing / Not Quoted", "Quote omitted"
+
+    s = str(raw_price_str).strip().lower()
+
+    if not s or any(k in s for k in ["unresolved", "not quoted", "missing", "nan", "none"]):
+        return np.nan, "UNRESOLVED", "Unresolved quote"
+
+    # Historical PO check
+    if "same as last year" in s or "historical" in s:
+        if is_new_sku or pd.isna(last_po_price) or float(last_po_price or 0) <= 0:
+            return np.nan, "UNRESOLVED", "Quoted 'Same as last year', but item is a New SKU with no PO history -> UNRESOLVED"
+        else:
+            landed = round(float(last_po_price) * 1.036, 2)
+            return landed, "Inferred (PO History)", f"Resolved from FY25 PO (₹{float(last_po_price):.2f}) + 3.6% index"
+
+    # Extract numeric value
+    match = re.search(r"[-+]?(?:\d*\.\d+|\d+)", s.replace(",", ""))
+    if not match:
+        return np.nan, "UNRESOLVED", f"Unparseable price: '{raw_price_str}'"
+
+    numeric_val = float(match.group(0))
+    freight = FREIGHT_RATES.get(delivery_loc, 1.20)
+
+    # Unit Conversion: ₹/kg
+    if "kg" in s or "per kg" in s:
+        wt = float(item_wt) if (pd.notna(item_wt) and item_wt > 0) else 0.25
+        # Strict formula: (extracted_price + freight_rate) * composite_weight
+        landed = round((numeric_val + freight) * wt, 2)
+        citation = f"(₹{numeric_val:.2f}/kg + ₹{freight:.2f} freight) × {wt:.3f}kg = ₹{landed:.2f}"
+        return landed, "Inferred (kg to piece)", citation
+
+    # Unit Conversion: Per 1,000 units
+    if "1000" in s or "/1,000" in s:
+        landed = round(numeric_val / 1000.0, 2)
+        citation = f"₹{numeric_val:,.2f} per 1,000 Nos ÷ 1000 = ₹{landed:.2f}"
+        return landed, "Inferred (/1000 to piece)", citation
+
+    # FX Conversion: USD to INR
+    if "usd" in s or "$" in s:
+        landed = round(numeric_val * FX_RATE, 2)
+        citation = f"USD ${numeric_val:.4f} × ₹{FX_RATE:.2f}/USD = ₹{landed:.2f}"
+        return landed, "Inferred (USD to INR)", citation
+
+    # Standard direct piece rate
+    return round(numeric_val, 2), "Verified", f"₹{numeric_val:.2f} direct piece quote"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. LIVE AWARD OPTIMIZATION ENGINE (PURE PANDAS MATH)
+# ─────────────────────────────────────────────────────────────────────────────
+def calculate_live_scenarios(df_current):
     """
     Computes Scenarios A, B, and C dynamically using vectorized Pandas logic.
     Directly bound to st.data_editor state.
@@ -451,20 +507,19 @@ def calculate_live_award_scenarios(df_current):
     df = df_current.copy()
     vendor_cols_all = ["V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)"]
 
-    # Coerce to numeric
     for c in vendor_cols_all:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df["Est. Qty"] = pd.to_numeric(df["Est. Qty"], errors="coerce").fillna(0)
     df["Budget Price"] = pd.to_numeric(df["Budget Price"], errors="coerce").fillna(0)
 
-    # ── Scenario A (Unconstrained L1): Minimum across all 5 vendors * Qty ──
+    # ── Scenario A (Unconstrained): min(axis=1) across all 5 vendors * Qty ──
     df["L1_A"] = df[vendor_cols_all].min(axis=1, skipna=True)
     spend_a = float((df["L1_A"] * df["Est. Qty"]).sum())
 
-    # ── Scenario B (Quality-Gated L1): Exclude disqualified vendors based on Questionnaire Audit ──
-    # Vendor 4 (Balaji) is disqualified across ALL lines (expired ISO cert)
-    # Vendor 3 (Global) is disqualified on Lines 10 & 30 (failed Q6: 7-ply)
-    # Vendor 5 (Standard Box) is disqualified on Lines 26 & 27 (failed Q7: moisture barrier)
+    # ── Scenario B (Quality-Gated): Exclude disqualified vendors based on Questionnaire Audit ──
+    # Vendor 4 (Balaji): Disqualified across ALL lines (expired ISO cert)
+    # Vendor 3 (Global): Disqualified on Lines 10 & 30 (no 7-ply capability)
+    # Vendor 5 (Standard Box): Disqualified on Lines 26 & 27 (no moisture barrier)
     b_spends = []
     c_spends = []
 
@@ -473,18 +528,18 @@ def calculate_live_award_scenarios(df_current):
         qty = row["Est. Qty"]
         crit = str(row.get("Criticality", "C")).strip().upper()
 
-        qualified_prices = {}
+        qualified = {}
         if pd.notna(row["V1 (Apex)"]):
-            qualified_prices["V1"] = row["V1 (Apex)"]
+            qualified["V1"] = row["V1 (Apex)"]
         if pd.notna(row["V2 (PackTech)"]):
-            qualified_prices["V2"] = row["V2 (PackTech)"]
+            qualified["V2"] = row["V2 (PackTech)"]
         if l_no not in [10, 30] and pd.notna(row["V3 (Global USD)"]):
-            qualified_prices["V3"] = row["V3 (Global USD)"]
-        # V4 is completely locked out
+            qualified["V3"] = row["V3 (Global USD)"]
+        # V4 is locked out of B and C
         if l_no not in [26, 27] and pd.notna(row["V5 (Standard Box)"]):
-            qualified_prices["V5"] = row["V5 (Standard Box)"]
+            qualified["V5"] = row["V5 (Standard Box)"]
 
-        sorted_prices = sorted(qualified_prices.values()) if qualified_prices else [row["Budget Price"]]
+        sorted_prices = sorted(qualified.values()) if qualified else [row["Budget Price"]]
         best_b = sorted_prices[0]
         b_spends.append(best_b * qty)
 
@@ -516,21 +571,9 @@ def calculate_live_award_scenarios(df_current):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. SIDEBAR: INGESTION, LLM CLIENT SETUP & NAVIGATION
+# 8. SIDEBAR: NAVIGATION & LIVE FILE UPLOADER
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("""
-    <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
-        <div style="background-color:#2563eb; color:white; width:34px; height:34px; border-radius:8px; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:16px;">
-            P
-        </div>
-        <div>
-            <div style="font-weight:700; font-size:15px; color:#0f172a; line-height:1.1;">ProcureAI</div>
-            <div style="font-size:11px; color:#64748b;">Active Dynamic Engine</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
     nav = st.radio(
         "Navigation",
         [
@@ -545,56 +588,25 @@ with st.sidebar:
 
     st.divider()
 
-    # ── 1. Document Upload Component ──
-    st.markdown("### 📥 Document Upload & Ingestion")
-    st.caption("Upload vendor quotes (.pdf, .xlsx, .docx, .jpg, .eml):")
+    st.markdown("### 📥 Live Document Upload")
+    st.caption("Upload raw quotations (`pdf`, `xlsx`, `docx`, `jpg`, `png`, `eml`):")
 
     uploaded_files = st.file_uploader(
         "Upload Vendor Quotes",
         accept_multiple_files=True,
-        type=['pdf', 'xlsx', 'docx', 'jpg', 'jpeg', 'eml'],
+        type=['pdf', 'xlsx', 'docx', 'jpg', 'jpeg', 'png', 'eml'],
         label_visibility="collapsed"
     )
 
-    # ── 2. Real LLM Client Configuration ──
-    st.markdown("### 🤖 OpenAI Reasoning Engine")
-    try:
-        api_key_from_secrets = st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-    except Exception:
-        api_key_from_secrets = os.getenv("OPENAI_API_KEY", "")
-
-    openai_api_key = st.text_input(
-        "OpenAI API Key",
-        value=api_key_from_secrets or "",
-        type="password",
-        help="Used to power live document extraction and dynamic LLM reasoning."
+    vendor_target = st.selectbox(
+        "Assign Uploaded Quotes to Vendor:",
+        ["V5 (Standard Box)", "V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)"],
+        index=0
     )
-
-    client = None
-    if openai_api_key and HAS_OPENAI:
-        try:
-            client = OpenAI(api_key=openai_api_key)
-            st.success("OpenAI Client Connected ✓", icon="🟢")
-        except Exception as e:
-            st.error(f"OpenAI Init Error: {e}")
-    else:
-        st.info("API Key optional: Running in hybrid mode with deterministic fallback reasoning.")
-
-    # 1-Click Sample Pack Button
-    if st.button("📥 Load Sample Quote Pack", use_container_width=True):
-        st.session_state.sample_pack_loaded = True
-        st.success("Loaded 3 sample vendor quote documents!")
-
-    # Reset Editor Overrides Button
-    if len(st.session_state.buyer_overrides) > 0:
-        st.markdown(f"**Active Overrides:** `{len(st.session_state.buyer_overrides)} cells`")
-        if st.button("↺ Reset All Overrides", use_container_width=True):
-            initialize_rfx_state()
-            st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. PROCESS UPLOADED DOCUMENTS (ASYNC EXTRACTION PIPELINE)
+# 9. EXECUTE LIVE EXTRACTION (IF FILES UPLOADED)
 # ─────────────────────────────────────────────────────────────────────────────
 if uploaded_files:
     if "processed_files" not in st.session_state:
@@ -602,37 +614,52 @@ if uploaded_files:
 
     for up_file in uploaded_files:
         if up_file.name not in st.session_state.processed_files:
-            with st.spinner(f"Extracting quotes from {up_file.name}..."):
-                extracted_data = asyncio.run(extract_vendor_quote(up_file, client=client))
-                target_col = extracted_data.get("vendor_name", "V5 (Standard Box)")
-                
-                # Append extracted items into st.session_state.df_norm
-                for item in extracted_data.get("quotes", []):
-                    l_no = item.get("line_no")
-                    raw_p = item.get("extracted_price")
-                    r_unit = item.get("raw_unit", "Nos")
-                    raw_txt = item.get("raw_source_text", "")
+            with st.spinner(f"Extracting live data from {up_file.name} using Vision/LLM..."):
+                try:
+                    quotes_extracted = extract_vendor_quote(up_file, openai_client)
+                    
+                    # Merge extracted quotes into st.session_state.df_norm
+                    count = 0
+                    for q in quotes_extracted:
+                        l_item = q.get("line_item")
+                        p_val = q.get("price")
+                        u_str = q.get("unit", "Nos")
+                        src_cite = q.get("source_citation", f"Extracted from {up_file.name}")
 
-                    if l_no and l_no in st.session_state.df_norm["Line #"].values:
-                        wt = st.session_state.item_weights.get(l_no, 0.25)
-                        landed = parse_and_convert_user_price(f"{raw_p} {r_unit}", wt)
+                        if l_item and l_item in st.session_state.df_norm["Line #"].values:
+                            row_idx = st.session_state.df_norm["Line #"] == l_item
+                            d_loc = st.session_state.df_norm.loc[row_idx, "Delivery Location"].values[0]
+                            c_wt = st.session_state.df_norm.loc[row_idx, "Est. Wt (kg)"].values[0]
+                            is_new = l_item in [25, 27, 28, 29, 30]
 
-                        if target_col in st.session_state.df_norm.columns:
-                            st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, target_col] = landed
-                            st.session_state.raw_traceability[l_no][f"{target_col[:2]}_raw"] = raw_txt
+                            landed, flag, cite = normalize_extracted_quote(
+                                f"{p_val} {u_str}" if p_val is not None else u_str,
+                                l_item, d_loc, c_wt, is_new
+                            )
 
-                st.session_state.processed_files.add(up_file.name)
-                st.toast(f"Successfully extracted {len(extracted_data.get('quotes', []))} items from {up_file.name}!", icon="📄")
+                            st.session_state.df_norm.loc[row_idx, vendor_target] = landed
+                            cite_col = f"{vendor_target.split()[0]} Citation"
+                            if cite_col in st.session_state.df_norm.columns:
+                                st.session_state.df_norm.loc[row_idx, cite_col] = f"{src_cite} -> {cite}"
+                            if vendor_target == "V5 (Standard Box)":
+                                st.session_state.df_norm.loc[row_idx, "V5 Trust Flag"] = flag
+
+                            count += 1
+
+                    st.session_state.processed_files.add(up_file.name)
+                    st.success(f"Live Extracted {count} line items from {up_file.name} into {vendor_target}!")
+                except Exception as e:
+                    st.error(f"Live extraction error on {up_file.name}: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8. COMPUTE LIVE OPTIMIZATION SPENDS DIRECTLY FROM STATE
+# 10. RECALCULATE LIVE SCENARIOS
 # ─────────────────────────────────────────────────────────────────────────────
-live_scenarios = calculate_live_award_scenarios(st.session_state.df_norm)
+live_scenarios = calculate_live_scenarios(st.session_state.df_norm)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 9. VIEW 1: OVERVIEW & STRATEGIC RECOMMENDATION
+# 11. VIEW 1: OVERVIEW & STRATEGIC RECOMMENDATION
 # ─────────────────────────────────────────────────────────────────────────────
 if nav == "🏠 Overview & Recommendation":
     st.markdown(f"""
@@ -640,8 +667,8 @@ if nav == "🏠 Overview & Recommendation":
         <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">
             <div>
                 <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
-                    <span class="badge-verified">Dynamic Backend Connected</span>
-                    <span style="font-size:12px; background-color:#eff6ff; color:#1d4ed8; padding:2px 8px; border-radius:6px; font-weight:600;">Live Recalculation Active</span>
+                    <span class="badge-verified">Live Production Backend Active</span>
+                    <span style="font-size:12px; background-color:#eff6ff; color:#1d4ed8; padding:2px 8px; border-radius:6px; font-weight:600;">FX Rate: ₹{FX_RATE:.2f}/USD</span>
                     <span style="font-size:12px; background-color:#f1f5f9; color:#475569; padding:2px 8px; border-radius:6px; font-weight:600;">RFx-CORR-2026-017</span>
                 </div>
                 <h2 style="font-size:22px; font-weight:800; color:#0f172a; margin:0 0 6px 0;">AI-Powered Procurement Co-pilot</h2>
@@ -658,7 +685,7 @@ if nav == "🏠 Overview & Recommendation":
     </div>
     """, unsafe_allow_html=True)
 
-    # 4 Live KPI Cards
+    # 4 Dynamic KPI Cards
     k1, k2, k3, k4 = st.columns(4)
     with k1:
         st.markdown(f"""
@@ -725,7 +752,7 @@ if nav == "🏠 Overview & Recommendation":
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 10. VIEW 2: QUOTE MATRIX & DYNAMIC RECALCULATION DATA EDITOR
+# 12. VIEW 2: QUOTE MATRIX & DYNAMIC RECALCULATION DATA EDITOR
 # ─────────────────────────────────────────────────────────────────────────────
 elif nav == "📊 Quote Comparison Matrix & Editor":
     st.markdown("""
@@ -747,56 +774,56 @@ elif nav == "📊 Quote Comparison Matrix & Editor":
     </div>
     """, unsafe_allow_html=True)
 
-    # Data Editor configured with st.data_editor
-    st.markdown("##### 📝 Interactive Data Editor (`edited_df = st.data_editor(...)`)")
-    st.caption("Unit conversions are handled dynamically upon cell edit (e.g. typing '42/kg' will automatically convert to landed price using composite board weight):")
-
     editor_cols = [
-        "Line #", "Item Code", "Description", "Est. Qty", "Criticality", "Budget Price",
-        "V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)", "V5 Status"
+        "Line #", "Item Code", "Description", "Est. Qty", "Delivery Location", "Criticality", "Budget Price",
+        "V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)", "V5 Trust Flag"
     ]
 
     edited_df = st.data_editor(
         st.session_state.df_norm[editor_cols],
         use_container_width=True,
         height=450,
-        disabled=["Line #", "Item Code", "Description", "Est. Qty", "Criticality", "Budget Price", "V5 Status"],
+        disabled=["Line #", "Item Code", "Description", "Est. Qty", "Delivery Location", "Criticality", "Budget Price", "V5 Trust Flag"],
         column_config={
             "Line #": st.column_config.NumberColumn(format="%d", width="small"),
             "Item Code": st.column_config.TextColumn(width="small"),
             "Description": st.column_config.TextColumn(width="medium"),
             "Est. Qty": st.column_config.NumberColumn(format="%d"),
+            "Delivery Location": st.column_config.TextColumn(width="medium"),
             "Budget Price": st.column_config.NumberColumn(format="₹%.2f"),
             "V1 (Apex)": st.column_config.NumberColumn(format="₹%.2f"),
             "V2 (PackTech)": st.column_config.NumberColumn(format="₹%.2f"),
             "V3 (Global USD)": st.column_config.NumberColumn(format="₹%.2f"),
             "V4 (Balaji)": st.column_config.NumberColumn(format="₹%.2f"),
             "V5 (Standard Box)": st.column_config.TextColumn(help="Type a number or '₹42/kg' to test live recalculation!"),
-            "V5 Status": st.column_config.TextColumn(width="medium")
+            "V5 Trust Flag": st.column_config.TextColumn(width="medium")
         }
     )
 
-    # ── Dynamic Recalculation Pipeline Execution ──
-    # Check for any edits made by the buyer in the editor
+    # ── Immediate Recalculation Pipeline Execution ──
     has_changes = False
     for idx, row in edited_df.iterrows():
         l_no = int(row["Line #"])
-        wt = st.session_state.item_weights.get(l_no, 0.25)
+        d_loc = row["Delivery Location"]
+        c_wt = st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, "Est. Wt (kg)"].values[0]
+        is_new = l_no in [25, 27, 28, 29, 30]
 
         for col in ["V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)"]:
             current_val = st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, col].values[0]
             edited_val = row[col]
 
-            # Parse and convert user input dynamically
-            converted_val = parse_and_convert_user_price(edited_val, wt)
+            # Run normalization math
+            converted_val, flag, cite = normalize_extracted_quote(edited_val, l_no, d_loc, c_wt, is_new)
 
             if pd.notna(converted_val) and (pd.isna(current_val) or abs(float(converted_val) - float(current_val)) > 1e-4):
                 st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, col] = converted_val
-                st.session_state.buyer_overrides[(l_no, col)] = converted_val
+                
+                cite_col = f"{col.split()[0]} Citation"
+                if cite_col in st.session_state.df_norm.columns:
+                    st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, cite_col] = f"Buyer Overridden: '{edited_val}' -> {cite}"
 
                 if col == "V5 (Standard Box)":
-                    st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, "V5 Status"] = "Buyer Overridden"
-                    st.session_state.raw_traceability[l_no]["V5_raw"] = f"Buyer Overridden: {edited_val} (Converted: ₹{converted_val:.2f})"
+                    st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, "V5 Trust Flag"] = "Buyer Overridden"
 
                 has_changes = True
 
@@ -804,39 +831,38 @@ elif nav == "📊 Quote Comparison Matrix & Editor":
         st.toast("Recalculation executed: Live math and award spend updated instantly!", icon="⚡")
         st.rerun()
 
-    # Traceability Inspector
-    st.markdown("### 🔍 Raw Source Text Traceability Inspector")
-    st.caption("Inspect the exact raw quote text extracted from documents for audit defense:")
+    # Traceability & Source Citation Inspector
+    st.markdown("### 🔍 Live Source Citation Inspector (Raw Extraction Traceability)")
+    st.caption("Inspect the exact raw source citations returned by the LLM extraction API:")
 
     inspect_line = st.selectbox(
-        "Choose Line Item to Trace:",
+        "Select Line Item to Inspect Citations:",
         options=list(range(1, 31)),
         index=26,
         format_func=lambda x: f"Line {x}: {st.session_state.df_norm.loc[st.session_state.df_norm['Line #'] == x, 'Item Code'].values[0]} — {st.session_state.df_norm.loc[st.session_state.df_norm['Line #'] == x, 'Description'].values[0][:40]}"
     )
 
-    if inspect_line in st.session_state.raw_traceability:
-        t_data = st.session_state.raw_traceability[inspect_line]
-        c1, c2, c3, c4, c5 = st.columns(5)
-        headers = [("V1_raw", "Apex (V1)", c1), ("V2_raw", "PackTech (V2)", c2), ("V3_raw", "Global USD (V3)", c3), ("V4_raw", "Balaji (V4)", c4), ("V5_raw", "Std Box (V5)", c5)]
-        for rk, vtitle, vcol in headers:
-            with vcol:
-                raw_snippet = t_data.get(rk, "N/A")
-                st.markdown(f"""
-                <div class="procure-card" style="padding:14px;">
-                    <div style="font-weight:700; color:#0f172a; font-size:13px;">{vtitle}</div>
-                    <div style="margin-top:8px;">
-                        <span style="font-size:10px; font-weight:700; color:#64748b; text-transform:uppercase;">Raw Source Snippet</span>
-                        <div style="font-family:monospace; font-size:11px; font-weight:700; color:#1e293b; background:#f1f5f9; padding:4px 6px; border-radius:4px; margin-top:2px;">
-                            {raw_snippet}
-                        </div>
+    line_row = st.session_state.df_norm[st.session_state.df_norm["Line #"] == inspect_line].iloc[0]
+    c1, c2, c3, c4, c5 = st.columns(5)
+    headers = [("V1 Citation", "Apex (V1)", c1), ("V2 Citation", "PackTech (V2)", c2), ("V3 Citation", "Global USD (V3)", c3), ("V4 Citation", "Balaji (V4)", c4), ("V5 Citation", "Std Box (V5)", c5)]
+    for rk, vtitle, vcol in headers:
+        with vcol:
+            raw_cite = line_row.get(rk, "N/A")
+            st.markdown(f"""
+            <div class="procure-card" style="padding:14px;">
+                <div style="font-weight:700; color:#0f172a; font-size:13px;">{vtitle}</div>
+                <div style="margin-top:8px;">
+                    <span style="font-size:10px; font-weight:700; color:#64748b; text-transform:uppercase;">Source Citation</span>
+                    <div style="font-family:monospace; font-size:11px; font-weight:700; color:#1e293b; background:#f1f5f9; padding:4px 6px; border-radius:4px; margin-top:2px;">
+                        {raw_cite}
                     </div>
                 </div>
-                """, unsafe_allow_html=True)
+            </div>
+            """, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 11. VIEW 3: LIVE AWARD SCENARIOS ENGINE (MATH & PANDAS)
+# 13. VIEW 3: LIVE AWARD SCENARIOS ENGINE (PURE PANDAS MATH)
 # ─────────────────────────────────────────────────────────────────────────────
 elif nav == "🎯 Live Award Scenarios Engine":
     st.markdown("""
@@ -946,7 +972,7 @@ elif nav == "🎯 Live Award Scenarios Engine":
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 12. VIEW 4: QUESTIONNAIRE AUDIT GATE
+# 14. VIEW 4: QUESTIONNAIRE AUDIT GATE
 # ─────────────────────────────────────────────────────────────────────────────
 elif nav == "🛡️ Questionnaire Audit Gate":
     st.markdown("""
@@ -958,7 +984,6 @@ elif nav == "🛡️ Questionnaire Audit Gate":
     </div>
     """, unsafe_allow_html=True)
 
-    # Vendor 4 Alert Box
     st.markdown("""
     <div style="background-color:#fef2f2; border:2px solid #ef4444; border-radius:12px; padding:18px; margin-bottom:18px;">
         <div style="display:flex; align-items:flex-start; gap:12px;">
@@ -981,7 +1006,7 @@ elif nav == "🛡️ Questionnaire Audit Gate":
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 13. VIEW 5: REAL AI PROCUREMENT ANALYST (LIVE LLM REASONING)
+# 15. VIEW 5: LIVE AI PROCUREMENT ANALYST (STRICT REASONING, NO CANNED RESPONSES)
 # ─────────────────────────────────────────────────────────────────────────────
 elif nav == "💬 AI Procurement Analyst (Live LLM)":
     st.markdown("""
@@ -990,7 +1015,7 @@ elif nav == "💬 AI Procurement Analyst (Live LLM)":
             <div>
                 <h2 style="font-size:20px; font-weight:800; color:#0f172a; margin:0 0 4px 0;">AI Procurement Analyst (Live LLM Reasoning Engine)</h2>
                 <p style="font-size:13px; color:#64748b; margin:0;">
-                    Live reasoning powered by OpenAI API with the active normalized matrix and audit database injected into context.
+                    Live reasoning powered by OpenAI API with the active normalized matrix and audit database injected into context. <strong>No canned responses.</strong>
                 </p>
             </div>
             <span class="badge-verified">Live LLM Context</span>
@@ -998,8 +1023,7 @@ elif nav == "💬 AI Procurement Analyst (Live LLM)":
     </div>
     """, unsafe_allow_html=True)
 
-    # 3 Pre-populated query chips
-    st.markdown("**Suggested Quick Inquiries:**")
+    st.markdown("**Interactive Quick Inquiries:**")
     qc1, qc2, qc3 = st.columns(3)
     
     chip1 = "Why is Vendor 5 marked unresolved for line 27?"
@@ -1026,25 +1050,26 @@ elif nav == "💬 AI Procurement Analyst (Live LLM)":
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # If query triggered, call real LLM
+    # Live LLM Generation Call
     if user_query:
         st.session_state.messages.append({"role": "user", "content": user_query})
         with st.chat_message("user"):
             st.markdown(user_query)
 
-        # Inject LIVE state of edited_df and questionnaire audit into LLM system context
+        # Inject LIVE state of edited_df into LLM context
         matrix_context = st.session_state.df_norm[[
-            "Line #", "Item Code", "Description", "Est. Qty", "Criticality",
-            "V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)", "V5 Status"
+            "Line #", "Item Code", "Description", "Est. Qty", "Delivery Location", "Criticality",
+            "V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)",
+            "V1 Citation", "V2 Citation", "V3 Citation", "V4 Citation", "V5 Citation", "V5 Trust Flag"
         ]].to_markdown(index=False)
 
         audit_context = st.session_state.df_gate.to_markdown(index=False)
 
-        system_instruction = f"""You are the AI Procurement Analyst co-pilot for RFx-CORR-2026-017 (Corrugated Packaging).
-You have full access to the live normalized matrix, active buyer overrides, and the Questionnaire Audit database.
+        system_instruction = f"""You are the AI Procurement Analyst co-pilot for RFx-CORR-2026-017.
+You are directly connected to the active normalized matrix and Questionnaire Audit database.
 
 --- LIVE DATA CONTEXT ---
-LIVE QUOTE MATRIX:
+LIVE QUOTE MATRIX & CITATIONS:
 {matrix_context}
 
 QUESTIONNAIRE AUDIT:
@@ -1058,70 +1083,26 @@ LIVE SCENARIO SPENDS (PANDAS CALCULATED):
 - Cost of Compliance: +₹{live_scenarios['cost_of_compliance']:,.0f} (+{live_scenarios['compliance_pct']:.2f}%)
 
 --- CRITICAL MANDATORY INSTRUCTIONS ---
-1. Base all quantitative reasoning strictly on the live numbers provided above.
-2. If the user asks about a line or vendor where the price is marked as 'UNRESOLVED' (e.g. Vendor 5 on Lines 25, 27, 28, 29, 30):
-   - You MUST explicitly refuse to recommend or assume a landed price.
-   - Clearly state that the quote is marked as UNRESOLVED because it quoted 'Same as last year' on a New SKU with no historical purchase order record.
-3. Be concise, executive-ready, and cite specific data points.
+1. You MUST base all answers strictly on the live numbers and citations provided above. DO NOT use canned responses.
+2. CRITICAL: When explaining why any price was inferred, converted, or unresolved, you MUST strictly cite the exact verbatim text from the 'Citation' fields (e.g. 'V5 Citation').
+3. If the user asks about an UNRESOLVED cell (e.g. Vendor 5 on Line 27 or other New SKUs), explicitly refuse to assume a landed cost and state: 'The quote is UNRESOLVED because it quoted Same as last year on a New SKU with no historical PO reference.' Mention that Line 27 also failed Gate Q7 for moisture barrier.
+4. Keep responses concise, high-trust, and executive-ready.
 """
 
         with st.chat_message("assistant"):
-            with st.spinner("AI Analyst reasoning over live dataset..."):
-                response_text = ""
-
-                # Real OpenAI Call
-                if client and HAS_OPENAI:
-                    try:
-                        completion = client.chat.completions.create(
-                            model="gpt-4o",
-                            messages=[
-                                {"role": "system", "content": system_instruction},
-                                {"role": "user", "content": user_query}
-                            ],
-                            temperature=0.1
-                        )
-                        response_text = completion.choices[0].message.content
-                    except Exception as e:
-                        response_text = f"⚠️ OpenAI API Error: {e}"
-
-                # Deterministic Grounded Reasoning Fallback if no API key provided
-                else:
-                    if user_query == chip1:
-                        response_text = (
-                            "**Audit Finding: Vendor 5 is UNRESOLVED on Line 27 (`CP-027`):**\n\n"
-                            "1. **Missing Baseline (New SKU):** Line 27 is designated as a **New SKU** with no FY25 purchase order history. Vendor 5 quoted *'same as last year'*, meaning there is no baseline PO price to anchor this quote.\n"
-                            "2. **Line Disqualification (Gate Q7):** In the *Questionnaire Audit*, Vendor 5 declared **NO to Q7** (Moisture-barrier coating). Because Line 27 requires moisture-barrier treatment for ocean freight, Vendor 5 is disqualified from award on this line.\n\n"
-                            "**Co-pilot Instruction Rule:** Because this quote is marked as **UNRESOLVED**, the engine refuses to guess a landed cost until the buyer overrides the cell or clarifies terms."
-                        )
-                    elif user_query == chip2:
-                        response_text = (
-                            f"**Live Cost of Compliance Analysis:**\n\n"
-                            f"Enforcing the quality gate (moving from Scenario A to Scenario B) costs **+₹{live_scenarios['cost_of_compliance']:,.0f} (+{live_scenarios['compliance_pct']:.2f}%)**:\n\n"
-                            f"| Scenario | Total Annual Spend | Net Savings vs Budget |\n"
-                            f"|---|---|---|\n"
-                            f"| **Scenario A: Unconstrained L1** | ₹{live_scenarios['spend_a']/1e7:.2f} Cr | ₹{live_scenarios['savings_a']/1e5:.2f} L |\n"
-                            f"| **Scenario B: Quality-Gated L1** | ₹{live_scenarios['spend_b']/1e7:.2f} Cr | ₹{live_scenarios['savings_b']/1e5:.2f} L |\n\n"
-                            f"**Recommendation:** Scenario A awards high-volume lines to Vendor 4 (expired ISO 9001 cert). The {live_scenarios['compliance_pct']:.2f}% premium in Scenario B guarantees 100% compliant supplier allocation."
-                        )
-                    elif user_query == chip3:
-                        response_text = (
-                            "**Risk Profile: Vendor 4 (Sri Balaji Packaging):**\n\n"
-                            "⛔ **Status: DISQUALIFIED (Failed Q1 through Q5)**\n\n"
-                            "• **Q1 (ISO 9001:2015):** **FAIL** — Certificate expired October 2026.\n"
-                            "• **Q2 (Capacity):** **FAIL** — 280 TPM (below 300 TPM threshold).\n"
-                            "• **Q3 (Testing Lab):** **FAIL** — No in-house testing lab.\n"
-                            "• **Q4 (Rejection Rate):** **FAIL** — 2.4% (exceeds 1.5% max limit).\n"
-                            "• **Q5 (Active Clients):** **FAIL** — Only 2 active references.\n\n"
-                            "Vendor 4 is dynamically locked out of Scenario B and C."
-                        )
-                    else:
-                        response_text = (
-                            f"**Live Reasoning for:** *\"{user_query}\"*\n\n"
-                            f"Based on the active normalized dataframe (FX rate: ₹84.50/USD, Active Overrides: {len(st.session_state.buyer_overrides)}):\n"
-                            f"- Master Budget: ₹{live_scenarios['budget_spend']/1e7:.2f} Cr\n"
-                            f"- Recommended Scenario B Spend: ₹{live_scenarios['spend_b']/1e7:.2f} Cr (Saves ₹{live_scenarios['savings_b']/1e5:.2f} Lakhs)\n\n"
-                            f"*Tip: Enter your OpenAI API Key in the left sidebar to activate live freeform multi-turn LLM generation!*"
-                        )
+            with st.spinner("AI Analyst executing live reasoning over current screen data..."):
+                try:
+                    completion = openai_client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[
+                            {"role": "system", "content": system_instruction},
+                            {"role": "user", "content": user_query}
+                        ],
+                        temperature=0.1
+                    )
+                    response_text = completion.choices[0].message.content
+                except Exception as e:
+                    response_text = f"⚠️ OpenAI API Error: {e}"
 
                 st.markdown(response_text)
                 st.session_state.messages.append({"role": "assistant", "content": response_text})
