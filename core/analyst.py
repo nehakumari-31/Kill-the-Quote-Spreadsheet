@@ -113,12 +113,15 @@ def answer_query(
     overrides: Optional[List[Any]] = None,
     fx_rate: float = 84.50,
     openai_client=None,
-    gate_result: Optional[Dict[str, Any]] = None
+    gate_result: Optional[Dict[str, Any]] = None,
+    conversation_history: Optional[List[Dict[str, Any]]] = None
 ) -> Tuple[str, str]:
     """
     Answers buyer query.
-    Uses OpenAI client when available; otherwise executes deterministic analytical reasoning.
-    Clearly distinguishes confirmed facts, unresolved data, and missing data.
+    Uses OpenAI GPT-4o client when available with full conversation history;
+    otherwise executes deterministic analytical reasoning grounded in live application data.
+    Clearly distinguishes confirmed facts, unresolved data, missing data, and disqualifications.
+    Never fabricates AI responses or presents deterministic output as GPT-4o.
     """
     if overrides is None:
         overrides = []
@@ -129,22 +132,49 @@ def answer_query(
 
     if openai_client:
         try:
+            # Build full message history for multi-turn conversation
+            api_messages = [{"role": "system", "content": system_prompt}]
+            if conversation_history:
+                for msg in conversation_history:
+                    role = msg.get("role")
+                    content = msg.get("content")
+                    if role in ["user", "assistant"] and content:
+                        api_messages.append({"role": role, "content": str(content)})
+
+            # Ensure current query is the terminal message without duplication
+            if not api_messages or api_messages[-1].get("role") != "user" or api_messages[-1].get("content") != user_query:
+                api_messages.append({"role": "user", "content": user_query})
+
             completion = openai_client.chat.completions.create(
                 model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_query}
-                ],
+                messages=api_messages,
                 temperature=0.0
             )
             return completion.choices[0].message.content, "Live OpenAI GPT-4o"
         except Exception as e:
-            fallback_ans = _deterministic_analyst_answer(user_query, df_matrix, qualifications, scenarios, overrides, gate_result=gate_result, fx_rate=fx_rate)
-            return f"⚠️ OpenAI API is unavailable: {e}\n\n**Deterministic Reasoning from Live State:**\n\n{fallback_ans}", "Deterministic Engine (API Unavailable)"
+            fallback_ans = _deterministic_analyst_answer(
+                user_query, df_matrix, qualifications, scenarios, overrides,
+                gate_result=gate_result, fx_rate=fx_rate, conversation_history=conversation_history
+            )
+            return (
+                f"⚠️ **OpenAI API Service Notice:** The OpenAI GPT-4o API call was unavailable or encountered an error: `{str(e)}`.\n\n"
+                f"> **Deterministic Reasoning from Live State:**\n"
+                f"> *The response below is generated deterministically by the live calculation and audit engine, NOT by GPT-4o.*\n\n"
+                f"{fallback_ans}",
+                "Deterministic Engine (API Unavailable)"
+            )
 
-    # Deterministic Engine Mode (no API key configured)
-    ans = _deterministic_analyst_answer(user_query, df_matrix, qualifications, scenarios, overrides, gate_result=gate_result, fx_rate=fx_rate)
-    return ans, "Deterministic Analytics Engine (Live State Connected)"
+    # Deterministic Engine Mode (no API key configured or offline)
+    ans = _deterministic_analyst_answer(
+        user_query, df_matrix, qualifications, scenarios, overrides,
+        gate_result=gate_result, fx_rate=fx_rate, conversation_history=conversation_history
+    )
+    return (
+        f"ℹ️ **Deterministic Analytics Engine (Offline Mode)**\n\n"
+        f"> *OpenAI API key is not configured. The response below is computed deterministically from active RFx data, NOT by GPT-4o.*\n\n"
+        f"{ans}",
+        "Deterministic Analytics Engine (Live State Connected)"
+    )
 
 
 def _deterministic_analyst_answer(
@@ -154,7 +184,8 @@ def _deterministic_analyst_answer(
     scenarios: Dict[str, Any],
     overrides: Optional[List[Any]] = None,
     gate_result: Optional[Dict[str, Any]] = None,
-    fx_rate: float = 84.50
+    fx_rate: float = 84.50,
+    conversation_history: Optional[List[Dict[str, Any]]] = None
 ) -> str:
     """
     Answers buyer queries dynamically using deterministic functions on the live state.
@@ -168,11 +199,30 @@ def _deterministic_analyst_answer(
 
     q_low = query.lower()
 
+    # Contextual awareness from conversation history for follow-up questions
+    context_prefix = ""
+    if conversation_history:
+        recent_user_turns = [m.get("content", "") for m in conversation_history if m.get("role") == "user"]
+        # Look at the most recent prior query (excluding current one if already present)
+        prior_queries = [uq for uq in recent_user_turns if uq.strip().lower() != q_low.strip()]
+        if prior_queries:
+            last_q = prior_queries[-1].lower()
+            context_prefix = last_q
+
+    # Helper to check keywords in current query or contextual prior query
+    def matches_context(keywords: List[str], check_prior_if_short: bool = True) -> bool:
+        if any(k in q_low for k in keywords):
+            return True
+        if check_prior_if_short and (len(q_low.split()) <= 6 or any(w in q_low for w in ["why", "explain", "how", "what about", "tell me more", "elaborate"])):
+            return any(k in context_prefix for k in keywords)
+        return False
+
     # Demonstration Question 1:
     # "Which vendor should we award to, and why? Compare the lowest-cost option with the quality and compliance requirements."
     is_q1 = (
         any(k in q_low for k in ["which vendor should we award to", "which vendor", "who should we award"])
         or (any(k in q_low for k in ["award", "recommendation"]) and any(k in q_low for k in ["lowest-cost", "lowest cost", "compliance requirements", "quality and compliance"]))
+        or (matches_context(["which vendor should we award to", "lowest-cost option", "quality and compliance requirements"]) and any(w in q_low for w in ["why", "elaborate", "tell me more", "how so"]))
     )
     if is_q1:
         spend_a = scenarios["spend_a"]
@@ -182,7 +232,7 @@ def _deterministic_analyst_answer(
         sav_pct_b = scenarios["savings_pct_b"]
         cost = scenarios["cost_of_compliance"]
         cost_pct = scenarios["compliance_pct"]
-        unres_count = gate_res_count = gate_result["unresolved_line_count"]
+        unres_count = gate_result["unresolved_line_count"]
         unres_lines = gate_result["unresolved_lines"]
 
         v_shares = scenarios.get("vendor_shares_b", {})
@@ -227,6 +277,7 @@ def _deterministic_analyst_answer(
     is_q2 = (
         any(k in q_low for k in ["commercial and compliance risks", "commercial risks", "key commercial"])
         or (any(k in q_low for k in ["unresolved items", "unresolved"]) and any(k in q_low for k in ["buyer intervention", "intervention", "risks"]))
+        or (matches_context(["commercial and compliance risks", "unresolved items"]) and any(w in q_low for w in ["why", "elaborate", "tell me more", "how so"]))
     )
     if is_q2:
         unres_count = gate_result["unresolved_line_count"]
@@ -265,6 +316,7 @@ def _deterministic_analyst_answer(
     is_q3 = (
         ("scenario b" in q_low and "scenario c" in q_low)
         or any(k in q_low for k in ["dual-sourcing trade-off", "dual sourcing trade-off", "dual sourcing tradeoff", "why is scenario b recommended over scenario c"])
+        or (matches_context(["scenario b", "scenario c", "dual-sourcing"]) and any(w in q_low for w in ["why", "elaborate", "tell me more", "how so"]))
     )
     if is_q3:
         spend_b = scenarios["spend_b"]
@@ -276,6 +328,14 @@ def _deterministic_analyst_answer(
         sav_pct_c = scenarios["savings_pct_c"]
         cost_diff = spend_c - spend_b
         pct_diff = (cost_diff / spend_b) * 100.0 if spend_b > 0 else 0.0
+
+        gate_notice_q3 = (
+            f"⚠️ **Approval Gate Notice:** {gate_result['status_label']}\n"
+            f"> *{gate_result['guidance_message']}* (Award approval is strictly BLOCKED until pending lines {gate_result['unresolved_lines']} are resolved)."
+            if gate_result["is_blocked"] else
+            f"✅ **Approval Gate Status:** {gate_result['status_label']}\n"
+            f"> *{gate_result['guidance_message']}*"
+        )
 
         out = [
             "### Scenario B vs Scenario C: Cost Difference & Dual-Sourcing Trade-Off Analysis\n",
@@ -289,13 +349,14 @@ def _deterministic_analyst_answer(
             "#### 3. Strategic Trade-Off: Resilience vs. Cost Optimization",
             "- **The Purpose of Scenario C (Risk Insurance):**",
             "  * Scenario C mandates a **70% L1 / 30% L2 split** on all **5 Criticality A packaging lines** (Lines 9, 10, 26, 27, 30: refrigerator and washing machine main cartons).",
-            "  * Paying the +₹1.33 Lakhs premium provides **supply chain redundancy**: if the primary supplier suffers machinery breakdown, paper shortage, or fire, the secondary supplier already has active tooling, approved dies, and active purchase orders.",
+            f"  * Paying the +₹{cost_diff:,.0f} (+{pct_diff:.2f}%) premium provides **supply chain redundancy**: if the primary supplier suffers machinery breakdown, paper shortage, or fire, the secondary supplier already has active tooling, approved dies, and active purchase orders.",
             "- **Why Scenario B is Recommended as the Baseline:**",
             "  * Apex Packaging (V1) is located within the Chakan industrial cluster with substantial capacity (800 TPM) and a proven 48-hour emergency lead time.",
-            "  * For standard corrugated packaging, single-sourcing with contractual delivery penalties and safety stock buffers is commercially standard, allowing Veda to retain the full ₹20.06 Lakhs in net savings.",
+            f"  * For standard corrugated packaging, single-sourcing with contractual delivery penalties and safety stock buffers is commercially standard, allowing Veda to retain the full ₹{sav_b:,.0f} ({sav_pct_b:.2f}%) in net savings.",
             "- **Decision Framework for Leadership:**",
-            "  * If management policy prioritizes supply continuity for high-criticality appliances over ₹1.33 L in savings, **Scenario C can be approved as an executive alternative**.",
-            f"\n*Approval Gate Note:* Both scenarios remain subject to the approval gate ({gate_result['status_label']})."
+            f"  * If management policy prioritizes supply continuity for high-criticality appliances over ₹{cost_diff:,.0f} in savings, **Scenario C can be approved as an executive alternative**.\n",
+            gate_notice_q3,
+            "\n*All figures are computed dynamically from current normalized matrix and scenario evaluations.*"
         ]
         return "\n".join(out)
 
@@ -440,12 +501,21 @@ def _deterministic_analyst_answer(
                 return "\n".join(out)
 
     # 4. General Executive Overview (Computed from active state)
+    gate_summary = (
+        f"- **Approval Gate Status:** **{gate_result['status_label']}**\n"
+        f"  * *Directive:* {gate_result['guidance_message']}\n"
+        f"  * *Pending Lines:* {gate_result['unresolved_lines']}"
+        if gate_result["is_blocked"] else
+        f"- **Approval Gate Status:** **{gate_result['status_label']}** (Award approval is ready to proceed)"
+    )
+
     return (
         f"### Executive Procurement Analysis (Live State Connected)\n"
         f"- **Master Budget Ceiling:** ₹{scenarios['budget_spend']:,.0f}\n"
         f"- **Recommended Scenario B Spend:** ₹{scenarios['spend_b']:,.0f} (Net Savings: ₹{scenarios['savings_b']:,.0f} / {scenarios['savings_pct_b']:.2f}%)\n"
         f"- **Scenario C Spend (Dual-Sourced):** ₹{scenarios['spend_c']:,.0f}\n"
         f"- **Cost of Compliance Premium:** +₹{scenarios['cost_of_compliance']:,.0f} (+{scenarios['compliance_pct']:.2f}%)\n"
+        f"{gate_summary}\n"
         f"- **Uncovered Mandatory Lines:** {len(scenarios.get('uncovered_lines_b', []))} lines\n"
         f"- **Active Buyer Overrides:** {len(overrides) if overrides else 0} overridden cells\n\n"
         f"Ask me about any specific Line # (e.g. 'Line 10' or 'Line 27'), vendor risks (e.g. 'Vendor 4'), "

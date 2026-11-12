@@ -1463,7 +1463,7 @@ elif nav == "💬 AI Procurement Analyst (Live LLM)":
 
     # 1. Suggested Demonstration Questions (Immediately Visible and Clickable)
     st.markdown("##### 💡 Suggested Demonstration Questions")
-    st.caption("Click any demonstration question below to trigger the live AI Analyst co-pilot grounded in active application data:")
+    st.caption("Click any demonstration question card below to trigger the live AI Analyst co-pilot grounded in active application data:")
 
     demo_q1 = "Which vendor should we award to, and why? Compare the lowest-cost option with the quality and compliance requirements."
     demo_q2 = "What are the key commercial and compliance risks in these quotations? Identify unresolved items that require buyer intervention."
@@ -1473,30 +1473,35 @@ elif nav == "💬 AI Procurement Analyst (Live LLM)":
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button(
-            f"🏆 **Vendor Award & Cost of Compliance**\n\n_{demo_q1}_",
+            f"🏆 **Question 1: Award & Compliance**\n\n_{demo_q1}_",
             key="btn_demo_q1",
-            use_container_width=True
+            use_container_width=True,
+            help="Evaluate lowest-cost vs quality-gated award and cost of compliance"
         ):
             user_query = demo_q1
     with col2:
         if st.button(
-            f"⚠️ **Commercial & Quality Risks**\n\n_{demo_q2}_",
+            f"⚠️ **Question 2: Risks & Gate**\n\n_{demo_q2}_",
             key="btn_demo_q2",
-            use_container_width=True
+            use_container_width=True,
+            help="Evaluate commercial risks, unresolved lines, and vendor restrictions"
         ):
             user_query = demo_q2
     with col3:
         if st.button(
-            f"⚖️ **Scenario B vs C Dual-Sourcing**\n\n_{demo_q3}_",
+            f"⚖️ **Question 3: Scenario B vs C**\n\n_{demo_q3}_",
             key="btn_demo_q3",
-            use_container_width=True
+            use_container_width=True,
+            help="Evaluate cost difference and dual-sourcing resilience trade-off"
         ):
             user_query = demo_q3
 
-    # Toolbar with Clear Conversation
-    tb_left, tb_right = st.columns([6, 1])
+    # Toolbar with Clear Conversation / Reset Chat
+    tb_left, tb_right = st.columns([5, 1.2])
+    with tb_left:
+        st.markdown("##### 💬 Conversation History")
     with tb_right:
-        if st.button("🗑️ Clear Chat", key="btn_clear_chat", use_container_width=True, help="Reset conversation history"):
+        if st.button("🔄 Reset Chat", key="btn_reset_chat", use_container_width=True, help="Clear conversation history"):
             st.session_state.messages = []
             st.rerun()
 
@@ -1504,6 +1509,17 @@ elif nav == "💬 AI Procurement Analyst (Live LLM)":
     custom_query = st.chat_input("Ask co-pilot about vendor quotes, active overrides, or compliance...")
     if custom_query:
         user_query = custom_query
+
+    # Avoid duplicate message appends when users click a demonstration question consecutively
+    if user_query:
+        if (
+            st.session_state.messages
+            and len(st.session_state.messages) >= 2
+            and st.session_state.messages[-2].get("role") == "user"
+            and st.session_state.messages[-2].get("content") == user_query
+            and st.session_state.messages[-1].get("role") == "assistant"
+        ):
+            user_query = None
 
     # Empty State Guidance (Shown when no conversation exists yet and no button clicked)
     if not st.session_state.messages and not user_query:
@@ -1550,7 +1566,8 @@ elif nav == "💬 AI Procurement Analyst (Live LLM)":
                         overrides=st.session_state.get("buyer_overrides", []),
                         fx_rate=FX_RATE,
                         openai_client=active_client,
-                        gate_result=gate_result
+                        gate_result=gate_result,
+                        conversation_history=st.session_state.messages
                     )
                 except Exception as e:
                     response_text = f"⚠️ Analyst Execution Error: {str(e)}"

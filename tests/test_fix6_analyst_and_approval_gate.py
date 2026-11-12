@@ -345,3 +345,173 @@ def test_analyst_handles_api_failure_gracefully_with_live_data(base_rfx_state):
     assert "Deterministic Reasoning" in ans
     assert f"{scenarios['spend_b']:,.0f}" in ans
     assert mode == "Deterministic Engine (API Unavailable)"
+
+
+def test_analyst_passes_full_conversation_history_to_openai(base_rfx_state):
+    """
+    Verifies that when OpenAI client is used, the complete conversation history
+    is passed to the API on subsequent turns, avoiding duplicate messages.
+    """
+    matrix = base_rfx_state["matrix"]
+    gate_df = base_rfx_state["gate"]
+    quals = base_rfx_state["quals"]
+    scenarios = calculate_award_scenarios(matrix, quals)
+
+    captured_calls = []
+
+    class MockOpenAIClient:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(*args, **kwargs):
+                    captured_calls.append(kwargs)
+                    class Response:
+                        class Choice:
+                            class Message:
+                                content = "Mocked GPT-4o analytical reasoning response."
+                            message = Message()
+                        choices = [Choice()]
+                    return Response()
+
+    prior_history = [
+        {"role": "user", "content": "Question 1: Which vendor should we award to?"},
+        {"role": "assistant", "content": "We recommend Scenario B (Apex Packaging).", "engine": "Live OpenAI GPT-4o"}
+    ]
+    follow_up_q = "What are the key risks with this award?"
+
+    ans, mode = answer_query(
+        user_query=follow_up_q,
+        df_matrix=matrix,
+        df_audit=gate_df,
+        qualifications=quals,
+        scenarios=scenarios,
+        overrides=[],
+        fx_rate=84.50,
+        openai_client=MockOpenAIClient(),
+        conversation_history=prior_history
+    )
+
+    assert mode == "Live OpenAI GPT-4o"
+    assert ans == "Mocked GPT-4o analytical reasoning response."
+    assert len(captured_calls) == 1
+
+    messages_sent = captured_calls[0]["messages"]
+    assert messages_sent[0]["role"] == "system"
+    assert messages_sent[1]["role"] == "user"
+    assert messages_sent[1]["content"] == "Question 1: Which vendor should we award to?"
+    assert messages_sent[2]["role"] == "assistant"
+    assert messages_sent[2]["content"] == "We recommend Scenario B (Apex Packaging)."
+    assert messages_sent[3]["role"] == "user"
+    assert messages_sent[3]["content"] == follow_up_q
+    # Total messages: system + 2 prior turns + 1 new query = 4
+    assert len(messages_sent) == 4
+
+
+def test_analyst_figures_are_strictly_dynamic(base_rfx_state):
+    """
+    Verifies that all numerical values in Analyst responses are dynamically obtained
+    from the current calculation engine and RFx data, never hardcoded.
+    """
+    matrix = base_rfx_state["matrix"]
+    gate_df = base_rfx_state["gate"]
+    quals = base_rfx_state["quals"]
+
+    # Custom modified scenarios to test dynamic calculation reflection
+    custom_scenarios = {
+        "budget_spend": 50000000.0,
+        "spend_a": 42000000.0,
+        "savings_a": 8000000.0,
+        "savings_pct_a": 16.0,
+        "spend_b": 44000000.0,
+        "savings_b": 6000000.0,
+        "savings_pct_b": 12.0,
+        "spend_c": 47500000.0,
+        "savings_c": 2500000.0,
+        "savings_pct_c": 5.0,
+        "cost_of_compliance": 2000000.0,
+        "compliance_pct": 4.76,
+        "uncovered_lines_b": [],
+        "risks_b": [],
+        "vendor_shares_b": {"Apex Packaging (V1)": {"spend": 44000000.0, "share_pct": 100.0}}
+    }
+
+    q3 = "Why is Scenario B recommended over Scenario C? Explain the cost difference and the dual-sourcing trade-off."
+    ans, _ = answer_query(
+        user_query=q3,
+        df_matrix=matrix,
+        df_audit=gate_df,
+        qualifications=quals,
+        scenarios=custom_scenarios,
+        overrides=[],
+        fx_rate=84.50,
+        openai_client=None
+    )
+
+    # Dynamic cost diff: 47,500,000 - 44,000,000 = 3,500,000
+    assert "3,500,000" in ans
+    assert "44,000,000" in ans
+    assert "47,500,000" in ans
+    assert "6,000,000" in ans
+    # Must NOT have old hardcoded figures
+    assert "1,33,356" not in ans
+    assert "1.33 Lakhs" not in ans
+    assert "20.06 Lakhs" not in ans
+
+
+def test_analyst_followup_question_retains_context(base_rfx_state):
+    """
+    Verifies that follow-up questions retain context when previous conversation is provided.
+    """
+    matrix = base_rfx_state["matrix"]
+    gate_df = base_rfx_state["gate"]
+    quals = base_rfx_state["quals"]
+    scenarios = calculate_award_scenarios(matrix, quals)
+
+    history = [
+        {"role": "user", "content": "Which vendor should we award to, and why? Compare the lowest-cost option with the quality and compliance requirements."},
+        {"role": "assistant", "content": "Award on Scenario B. Vendor 4 is disqualified."}
+    ]
+
+    # Follow up asking "Why?"
+    ans, _ = answer_query(
+        user_query="Why was that vendor disqualified?",
+        df_matrix=matrix,
+        df_audit=gate_df,
+        qualifications=quals,
+        scenarios=scenarios,
+        overrides=[],
+        fx_rate=84.50,
+        openai_client=None,
+        conversation_history=history
+    )
+
+    assert "Vendor 4" in ans or "Sri Balaji" in ans
+    assert "ISO 9001" in ans
+    assert "280 TPM" in ans or "capacity" in ans.lower()
+
+
+def test_analyst_offline_mode_distinct_from_gpt(base_rfx_state):
+    """
+    Verifies that when OpenAI client is None, the response is explicitly branded as
+    Deterministic Analytics Engine and does not claim to be GPT-4o output.
+    """
+    matrix = base_rfx_state["matrix"]
+    gate_df = base_rfx_state["gate"]
+    quals = base_rfx_state["quals"]
+    scenarios = calculate_award_scenarios(matrix, quals)
+
+    ans, mode = answer_query(
+        user_query="What are the key commercial and compliance risks in these quotations? Identify unresolved items that require buyer intervention.",
+        df_matrix=matrix,
+        df_audit=gate_df,
+        qualifications=quals,
+        scenarios=scenarios,
+        overrides=[],
+        fx_rate=84.50,
+        openai_client=None
+    )
+
+    assert "Deterministic Analytics Engine" in mode
+    assert "NOT by GPT-4o" in ans
+    assert "Deterministic Analytics Engine (Offline Mode)" in ans
+
