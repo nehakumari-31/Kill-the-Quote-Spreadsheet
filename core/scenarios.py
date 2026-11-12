@@ -9,26 +9,61 @@ Calculates:
 - Max supplier share constraints
 """
 
+import re
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Any, Optional, Tuple
 from core.eligibility import VendorQualification, is_vendor_eligible_for_line, _extract_vendor_id
+from core.config import ELIGIBLE_BIDDER_COLUMNS, VENDORS
+
+# Explicit patterns that must NEVER enter candidate bidder columns
+EXCLUDED_COLUMN_PATTERNS = [
+    "raw value", "raw uom", "raw", "uom", "status", "unresolved reason",
+    "reason", "citation", "trust flag", "trust", "audit", "flag",
+    "line #", "item code", "description", "est. qty", "delivery location",
+    "criticality", "budget price", "est. wt (kg)", "l1_a", "l1_price_a", "l1_vendor_a"
+]
 
 
-def _get_vendor_columns(df_matrix: pd.DataFrame, qualifications: Dict[str, VendorQualification]) -> List[str]:
-    """Dynamically identifies vendor quote columns from the matrix without hardcoding vendor names."""
-    excluded = {
-        "Line #", "Item Code", "Description", "Est. Qty", "Delivery Location",
-        "Criticality", "Budget Price", "Est. Wt (kg)", "V5 Trust Flag",
-        "L1_A", "L1_Price_A", "L1_Vendor_A"
-    }
-    candidates = [
-        c for c in df_matrix.columns
-        if c not in excluded and not str(c).endswith("Citation") and not str(c).endswith("Trust Flag")
-    ]
-    # Filter or prioritize columns matching known vendors from qualifications
-    matched = [c for c in candidates if _extract_vendor_id(c) in qualifications]
-    return matched if matched else candidates
+def _is_excluded_column(col_name: str) -> bool:
+    """Checks if a column name matches any raw extraction, metadata, citation, reason, or audit pattern."""
+    s = str(col_name).strip().lower()
+    for pattern in EXCLUDED_COLUMN_PATTERNS:
+        if pattern in s:
+            return True
+    return False
+
+
+def _get_vendor_columns(df_matrix: pd.DataFrame, qualifications: Optional[Dict[str, VendorQualification]] = None) -> List[str]:
+    """
+    Identifies the exact normalized vendor quote columns from the matrix.
+    Explicitly excludes all raw extraction, citation, status, trust, UOM, reason, and audit columns.
+    Only normalized vendor price columns may participate in award calculations:
+    - V1 (Apex)
+    - V2 (PackTech)
+    - V3 (Global USD)
+    - V4 (Balaji)
+    - V5 (Standard Box)
+    """
+    # 1. Primary rule: check for exact configured eligible bidder columns present in the matrix
+    configured_present = [c for c in ELIGIBLE_BIDDER_COLUMNS if c in df_matrix.columns]
+    if configured_present:
+        return configured_present
+
+    # 2. Strict filtering for custom/dynamic test matrices
+    candidates = []
+    for c in df_matrix.columns:
+        c_str = str(c).strip()
+        if _is_excluded_column(c_str):
+            continue
+        v_id = _extract_vendor_id(c_str)
+        if qualifications and v_id in qualifications:
+            candidates.append(c_str)
+        elif v_id in VENDORS:
+            candidates.append(c_str)
+        elif re.match(r"^V\d+", c_str, re.IGNORECASE):
+            candidates.append(c_str)
+    return candidates
 
 
 def _evaluate_and_apply_scenario_discounts(
@@ -246,6 +281,8 @@ def calculate_award_scenarios(
 
     for col in vendor_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+        # Ensure non-positive, zero, or missing values cannot participate in L1 selection
+        df.loc[df[col] <= 0, col] = np.nan
     df["Est. Qty"] = pd.to_numeric(df["Est. Qty"], errors="coerce").fillna(0)
     df["Budget Price"] = pd.to_numeric(df["Budget Price"], errors="coerce").fillna(0)
 

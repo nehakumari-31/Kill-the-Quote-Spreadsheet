@@ -1,6 +1,6 @@
 """
-AI-Powered Procurement Co-pilot (Production Backend)
-=====================================================
+AI-Powered Procurement Co-pilot | Working Prototype
+===================================================
 A live, deterministic decision-support application for category buyers.
 
 Key Architectural Components:
@@ -25,6 +25,7 @@ import json
 import re
 import io
 import base64
+import html
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
 
@@ -61,7 +62,7 @@ from email.parser import BytesParser
 # 1. PAGE SETUP & STRICT LIGHT THEME STYLING
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="ProcureAI | Production Backend Co-pilot",
+    page_title="ProcureAI | Working Prototype",
     page_icon="📦",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -196,7 +197,7 @@ with st.sidebar:
         </div>
         <div>
             <div style="font-weight:700; font-size:15px; color:#0f172a; line-height:1.1;">ProcureAI</div>
-            <div style="font-size:11px; color:#64748b;">Production Backend</div>
+            <div style="font-size:11px; color:#64748b;">Working Prototype</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -829,8 +830,8 @@ if nav == "🏠 Overview & Recommendation":
         <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:12px;">
             <div>
                 <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px;">
-                    <span class="badge-verified">Live Production Backend Active</span>
-                    <span style="font-size:12px; background-color:#eff6ff; color:#1d4ed8; padding:2px 8px; border-radius:6px; font-weight:600;">FX Rate: ₹{FX_RATE:.2f}/USD</span>
+                    <span class="badge-verified">AI-Powered Procurement Co-pilot | Working Prototype</span>
+                    <span style="font-size:12px; background-color:#eff6ff; color:#1d4ed8; padding:2px 8px; border-radius:6px; font-weight:600;">RFx bid-close FX assumption: ₹{FX_RATE:.2f}/USD | Rate to be locked at bid close: {DEFAULT_FX_EFFECTIVE_DATE}</span>
                     <span style="font-size:12px; background-color:#f1f5f9; color:#475569; padding:2px 8px; border-radius:6px; font-weight:600;">RFx-CORR-2026-017</span>
                 </div>
                 <h2 style="font-size:22px; font-weight:800; color:#0f172a; margin:0 0 6px 0;">AI-Powered Procurement Co-pilot</h2>
@@ -1068,18 +1069,54 @@ elif nav == "📊 Quote Comparison Matrix & Editor":
             raw_uom = line_row.get(f"{vcode} Raw UOM", "N/A")
             v_status = line_row.get(f"{vcode} Status", "Verified")
             unres_msg = line_row.get(f"{vcode} Unresolved Reason")
+
+            safe_vtitle = html.escape(str(vtitle))
+            safe_val = html.escape(str(raw_val))
+            safe_uom = html.escape(str(raw_uom))
+            safe_status = html.escape(str(v_status))
+            safe_cite = html.escape(str(raw_cite))
+
+            # Only render reason block when a valid, non-empty, non-NaN reason exists
+            is_valid_reason = (
+                pd.notna(unres_msg)
+                and unres_msg is not None
+                and str(unres_msg).strip() != ""
+                and str(unres_msg).strip().lower() not in ["none", "nan", "<na>", "null"]
+            )
+            reason_html = ""
+            if is_valid_reason:
+                safe_reason = html.escape(str(unres_msg))
+                reason_html = f'<div style="font-size:11px; color:#b91c1c; background:#fee2e2; padding:4px 6px; border-radius:4px; margin-top:4px;"><strong>Reason:</strong> {safe_reason}</div>'
+
+            st_lower = str(v_status).strip().lower()
+            if st_lower == "unresolved":
+                badge_class = "badge-unresolved"
+                badge_label = "! UNRESOLVED"
+            elif st_lower == "inferred":
+                badge_class = "badge-inferred"
+                badge_label = "⚠ Inferred"
+            elif st_lower == "overridden":
+                badge_class = "badge-overridden"
+                badge_label = "✎ Overridden"
+            elif st_lower in ["disqualified", "missing"]:
+                badge_class = "badge-disqualified"
+                badge_label = safe_status
+            else:
+                badge_class = "badge-verified"
+                badge_label = "✓ Verified"
+
             st.markdown(f"""
             <div class="procure-card" style="padding:14px;">
-                <div style="font-weight:700; color:#0f172a; font-size:13px;">{vtitle}</div>
-                <div style="font-size:11px; color:#64748b; margin-top:2px;">Raw: <code>{raw_val} ({raw_uom})</code></div>
+                <div style="font-weight:700; color:#0f172a; font-size:13px;">{safe_vtitle}</div>
+                <div style="font-size:11px; color:#64748b; margin-top:2px;">Raw: <code>{safe_val} ({safe_uom})</code></div>
                 <div style="margin-top:6px;">
-                    <span style="font-size:10px; font-weight:700; color:{'#b91c1c' if v_status=='Unresolved' else '#15803d'}; text-transform:uppercase;">Status: {v_status}</span>
+                    <span class="{badge_class}">Status: {badge_label}</span>
                 </div>
-                {f'<div style="font-size:11px; color:#b91c1c; background:#fee2e2; padding:4px 6px; border-radius:4px; margin-top:4px;"><strong>Reason:</strong> {unres_msg}</div>' if unres_msg else ''}
+                {reason_html}
                 <div style="margin-top:8px;">
                     <span style="font-size:10px; font-weight:700; color:#64748b; text-transform:uppercase;">Source Citation</span>
-                    <div style="font-family:monospace; font-size:11px; font-weight:700; color:#1e293b; background:#f1f5f9; padding:4px 6px; border-radius:4px; margin-top:2px;">
-                        {raw_cite}
+                    <div style="font-family:monospace; font-size:11px; font-weight:700; color:#1e293b; background:#f1f5f9; padding:4px 6px; border-radius:4px; margin-top:2px; word-break:break-word; white-space:pre-wrap;">
+                        {safe_cite}
                     </div>
                 </div>
             </div>
@@ -1094,7 +1131,7 @@ elif nav == "🎯 Live Award Scenarios Engine":
     <div class="procure-card">
         <h2 style="font-size:20px; font-weight:800; color:#0f172a; margin:0 0 4px 0;">Live Award Scenarios Optimization Engine</h2>
         <p style="font-size:13px; color:#64748b; margin:0;">
-            All totals are calculated on the fly using live Pandas vector math. <strong>No hardcoded totals exist in the codebase.</strong>
+            All totals are calculated dynamically using live Pandas vector math across normalized bids.
         </p>
     </div>
     """, unsafe_allow_html=True)
@@ -1173,7 +1210,7 @@ elif nav == "🎯 Live Award Scenarios Engine":
         plot_bgcolor="#ffffff",
         paper_bgcolor="#ffffff",
         margin=dict(l=40, r=40, t=50, b=40),
-        yaxis=dict(range=[36000000, max(chart_df["Spend"]) * 1.08], tickformat="₹,~s", gridcolor="#f1f5f9")
+        yaxis=dict(range=[0, max(chart_df["Spend"]) * 1.15], tickformat="₹,~s", gridcolor="#f1f5f9")
     )
     st.plotly_chart(fig, use_container_width=True)
 

@@ -14,7 +14,8 @@ TAKEUP_FACTORS = {
 
 # Currency exchange rates
 DEFAULT_FX_RATE = 84.50  # USD to INR
-DEFAULT_FX_EFFECTIVE_DATE = "19-Nov-2026"
+DEFAULT_FX_EFFECTIVE_DATE = "19-Nov-2026"  # RFx bid closing date
+DEFAULT_FX_LABEL = f"RFx bid-close FX assumption: ₹{DEFAULT_FX_RATE:.2f}/USD | Rate to be locked at bid close: {DEFAULT_FX_EFFECTIVE_DATE}"
 
 # Freight rates in ₹/kg by delivery location
 DEFAULT_FREIGHT_RATES = {
@@ -37,6 +38,15 @@ VENDORS = {
     "V4": {"name": "V4 (Balaji)", "full_name": "Sri Balaji Packaging", "currency": "INR", "location": "Chakan, Pune"},
     "V5": {"name": "V5 (Standard Box)", "full_name": "Standard Box Corp", "currency": "INR", "location": "Bhiwandi"}
 }
+
+# Exact five eligible bidder columns permitted in award calculations
+ELIGIBLE_BIDDER_COLUMNS = [
+    "V1 (Apex)",
+    "V2 (PackTech)",
+    "V3 (Global USD)",
+    "V4 (Balaji)",
+    "V5 (Standard Box)"
+]
 
 # Questionnaire evaluation rules
 MANDATORY_CRITERIA = {

@@ -214,7 +214,7 @@ def _deterministic_analyst_answer(
             f"- **Scenario C (Dual Sourcing 70/30):** **₹{spend_c:,.0f}** (Saves ₹{scenarios['savings_c']:,.0f} / {scenarios['savings_pct_c']:.2f}%)",
             f"- **Cost of Compliance (B vs A):** **+₹{cost:,.0f} (+{pct:.2f}%)**",
             f"- **Uncovered Lines in Scenario B:** {uncovered if uncovered else 'None (100% Mandatory Coverage Achieved)'}\n",
-            "**Strategic Fact:** The compliance premium of ₹{cost:,.0f} is required to enforce mandatory RFx quality gates "
+            f"**Strategic Fact:** The compliance premium of ₹{cost:,.0f} is required to enforce mandatory RFx quality gates "
             "(excluding uncertified Vendor 4 due to expired ISO 9001 and inadequate 280 TPM capacity). All figures are computed dynamically."
         ]
         return "\n".join(out)

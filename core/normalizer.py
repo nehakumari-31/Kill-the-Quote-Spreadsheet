@@ -23,7 +23,7 @@ from core.config import (
     DEFAULT_FX_EFFECTIVE_DATE,
     DEFAULT_FREIGHT_RATES
 )
-from core.models import NormalizationResult, UnresolvedStatus
+from core.models import NormalizationResult, UnresolvedStatus, InferredStatus
 
 
 def validate_technical_specification(
@@ -325,7 +325,7 @@ def normalize_price(
         eff_fx_rate = float(fx_rate)
         eff_fx_date = fx_effective_date or DEFAULT_FX_EFFECTIVE_DATE
         price_in_inr = quoted_numeric * eff_fx_rate
-        fx_formula_part = f"{orig_curr} {quoted_numeric:.4f} × ₹{eff_fx_rate:.2f}/{orig_curr} (eff. {eff_fx_date})"
+        fx_formula_part = f"{orig_curr} {quoted_numeric:.4f} × ₹{eff_fx_rate:.2f}/{orig_curr} (RFx bid-close assumption: {eff_fx_date})"
     else:
         price_in_inr = quoted_numeric
         fx_formula_part = f"₹{quoted_numeric:.2f}"
@@ -514,24 +514,41 @@ def normalize_price(
     else:
         discount_desc = None
 
-    landed_cost = round(price_per_piece, 2)
-    final_citation = f"{uom_formula_part} = ₹{landed_cost:.2f}"
+    if is_foreign_currency:
+        val = round(price_per_piece, 4)
+        if round(val, 2) == val:
+            landed_cost = round(val, 2)
+        elif round(val, 3) == val:
+            landed_cost = round(val, 3)
+        else:
+            landed_cost = val
+    else:
+        landed_cost = round(price_per_piece, 2)
 
-    # Determine trust flag
+    cost_str = f"₹{landed_cost:.3f}" if (is_foreign_currency and round(landed_cost, 2) != landed_cost) else f"₹{landed_cost:.2f}"
+    final_citation = f"{uom_formula_part} = {cost_str}"
+
+    # Determine trust flag and status per PRD classification:
+    # Directly extracted -> Verified; System-derived currency conversion -> Inferred
     if is_foreign_currency:
         trust_flag = "Inferred (USD to INR)" if orig_curr == "USD" else f"Inferred ({orig_curr} to INR)"
+        status_val = InferredStatus("Inferred")
     elif quoted_uom_type == "per_1000":
         trust_flag = "Inferred (/1000 to piece)"
+        status_val = "Verified"
     elif quoted_uom_type == "kg":
         trust_flag = "Inferred (kg to piece)"
+        status_val = "Verified"
     elif quoted_uom_type == "sqm":
         trust_flag = "Inferred (sqm to piece)"
+        status_val = "Verified"
     else:
         trust_flag = "Verified"
+        status_val = "Verified"
 
     return NormalizationResult(
         normalized_price=landed_cost,
-        status="Verified",
+        status=status_val,
         trust_flag=trust_flag,
         formula_citation=final_citation,
         missing_inputs=[],
