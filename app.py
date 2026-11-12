@@ -181,9 +181,10 @@ from core.eligibility import (
     evaluate_vendor_qualifications,
     is_vendor_eligible_for_line
 )
-from core.scenarios import calculate_award_scenarios
+from core.scenarios import calculate_award_scenarios, evaluate_award_approval_gate
+from core.analyst import answer_query
 from core.extractor import extract_vendor_quote_file
-from core.models import QuotationMetadata, ExtractedField
+from core.models import QuotationMetadata, ExtractedField, BuyerOverrideRecord
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -515,6 +516,8 @@ def initialize_database():
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
+    if "buyer_overrides" not in st.session_state:
+        st.session_state.buyer_overrides = []
 
 initialize_database()
 
@@ -717,6 +720,15 @@ def calculate_live_scenarios(df_current):
     return calculate_award_scenarios(df_current, quals, conditional_discounts=discounts)
 
 
+def get_current_qualifications() -> Dict[str, Any]:
+    """Single source of truth for active vendor qualification audit records."""
+    df_gate = st.session_state.get("df_gate")
+    df_items = st.session_state.get("df_items")
+    if df_gate is not None and df_items is not None:
+        return evaluate_vendor_qualifications(df_gate, df_items)
+    return {}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 8. SIDEBAR: NAVIGATION & LIVE FILE UPLOADER
 # ─────────────────────────────────────────────────────────────────────────────
@@ -816,9 +828,15 @@ if uploaded_files:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 10. RECALCULATE LIVE SCENARIOS
+# 10. RECALCULATE LIVE SCENARIOS & CENTRALIZED APPROVAL GATE
 # ─────────────────────────────────────────────────────────────────────────────
 live_scenarios = calculate_live_scenarios(st.session_state.df_norm)
+current_qualifications = get_current_qualifications()
+gate_result = evaluate_award_approval_gate(
+    df_matrix=st.session_state.df_norm,
+    qualifications=current_qualifications,
+    overrides=st.session_state.get("buyer_overrides", [])
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -881,43 +899,72 @@ if nav == "🏠 Overview & Recommendation":
         </div>
         """, unsafe_allow_html=True)
     with k4:
-        unres_count = 0
-        for v_code in ["V1", "V2", "V3", "V4", "V5"]:
-            st_col = f"{v_code} Status"
-            if st_col in st.session_state.df_norm.columns:
-                unres_count += int((st.session_state.df_norm[st_col] == "Unresolved").sum())
-            elif v_code == "V5":
-                unres_count += int((st.session_state.df_norm.get("V5 Trust Flag", "") == "UNRESOLVED").sum())
+        unres_lines_count = gate_result["unresolved_line_count"]
         st.markdown(f"""
         <div class="procure-card" style="padding:16px;">
-            <div class="stat-label">Unresolved Quotes</div>
-            <div class="stat-number" style="color:{'#b91c1c' if unres_count > 0 else '#15803d'};">{unres_count}</div>
+            <div class="stat-label">Unresolved Lines (Approval Gate)</div>
+            <div class="stat-number" style="color:{'#b91c1c' if gate_result['is_blocked'] else '#15803d'};">{unres_lines_count}</div>
             <div style="font-size:11px; color:#64748b; margin-top:4px;">
-                {'Requires buyer review/override' if unres_count > 0 else 'All quotes resolved!'}
+                {'BLOCKED — Buyer action needed' if gate_result['is_blocked'] else 'Approval Ready: 0 blocking lines'}
             </div>
         </div>
         """, unsafe_allow_html=True)
 
-    # Executive Recommendation
-    st.markdown(f"""
-    <div class="procure-card-highlight">
-        <div style="display:flex; align-items:flex-start; gap:14px;">
-            <div style="background-color:#dcfce7; color:#15803d; width:38px; height:38px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:bold; flex-shrink:0;">
-                ★
-            </div>
-            <div style="flex:1;">
-                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-                    <div style="font-size:16px; font-weight:800; color:#0f172a;">Executive Recommendation: Award on Scenario B (Quality-Gated L1)</div>
-                    <span class="badge-verified">Dynamic Calculation: ₹{live_scenarios['spend_b']/1e7:.2f} Cr</span>
+    # Executive Recommendation with Centralized Approval Gate Integration
+    if gate_result["is_blocked"]:
+        st.markdown(f"""
+        <div class="procure-card" style="border: 2px solid #ef4444; background-color: #fef2f2; padding: 18px; margin-top: 14px; border-radius: 12px;">
+            <div style="display:flex; align-items:flex-start; gap:14px;">
+                <div style="background-color:#fee2e2; color:#b91c1c; width:40px; height:40px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:22px; font-weight:bold; flex-shrink:0;">
+                    ⛔
                 </div>
-                <p style="font-size:13px; color:#334155; line-height:1.6; margin:8px 0 10px 0;">
-                    Live calculations show that <strong>Scenario B</strong> delivers <strong>₹{live_scenarios['savings_b']/1e5:.2f} Lakhs in net savings</strong> while eliminating uncertified <strong>Vendor 4 (Sri Balaji Packaging)</strong> whose ISO 9001:2015 certificate expired in October 2026. 
-                    The compliance premium is exactly <strong>+₹{live_scenarios['cost_of_compliance']:,.0f} (+{live_scenarios['compliance_pct']:.2f}%)</strong>.
-                </p>
+                <div style="flex:1;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                        <div style="font-size:17px; font-weight:800; color:#991b1b;">
+                            {gate_result['status_label']}
+                        </div>
+                        <span style="background-color:#b91c1c; color:#ffffff; font-size:11px; font-weight:800; padding:3px 10px; border-radius:12px; text-transform:uppercase; letter-spacing:0.5px;">
+                            Approval Gate: Blocked
+                        </span>
+                    </div>
+                    <div style="font-size:13px; font-weight:700; color:#b91c1c; margin:6px 0 8px 0;">
+                        {gate_result['guidance_message']}
+                    </div>
+                    <p style="font-size:13px; color:#475569; line-height:1.6; margin:0 0 10px 0;">
+                        <strong>Target Recommendation:</strong> Scenario B (Quality-Gated L1) remains the optimal commercial strategy, delivering <strong>₹{live_scenarios['savings_b']/1e5:.2f} Lakhs in net savings</strong> (₹{live_scenarios['spend_b']/1e7:.2f} Cr spend) while eliminating uncertified <strong>Vendor 4 (Sri Balaji Packaging)</strong>. However, final award approval is strictly locked until unresolved commercial inputs are resolved.
+                    </p>
+                    <div style="background-color:#ffffff; border:1px solid #fecaca; border-radius:8px; padding:10px 14px; font-size:12px; color:#1e293b;">
+                        <strong>Blocking Lines ({gate_result['unresolved_line_count']}):</strong> Lines {gate_result['unresolved_lines']} — Vendor 5 quoted <em>'Same as last year'</em> on New SKUs with no historical baseline.
+                        <br><span style="color:#64748b;">Note: Genuinely disqualified vendors (Vendor 4 across all lines; Vendor 5 on Line 27 for moisture barrier) are excluded from the gate count.</span>
+                    </div>
+                </div>
             </div>
         </div>
-    </div>
-    """, unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <div class="procure-card-highlight" style="border: 2px solid #22c55e; background-color: #f0fdf4; padding: 18px; margin-top: 14px; border-radius: 12px;">
+            <div style="display:flex; align-items:flex-start; gap:14px;">
+                <div style="background-color:#dcfce7; color:#15803d; width:40px; height:40px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:22px; font-weight:bold; flex-shrink:0;">
+                    ✓
+                </div>
+                <div style="flex:1;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                        <div style="font-size:17px; font-weight:800; color:#14532d;">
+                            {gate_result['status_label']}
+                        </div>
+                        <span class="badge-verified">Approval Ready</span>
+                    </div>
+                    <div style="font-size:13px; font-weight:700; color:#15803d; margin:6px 0 8px 0;">
+                        {gate_result['guidance_message']}
+                    </div>
+                    <p style="font-size:13px; color:#334155; line-height:1.6; margin:0;">
+                        Live calculations confirm that <strong>Scenario B</strong> delivers <strong>₹{live_scenarios['savings_b']/1e5:.2f} Lakhs in net savings</strong> (Spend: ₹{live_scenarios['spend_b']/1e7:.2f} Cr) with 100% compliance across all 30 packaging items.
+                    </p>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1007,6 +1054,29 @@ elif nav == "📊 Quote Comparison Matrix & Editor":
                 st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Unresolved Reason"] = unres_reason
                 if col == "V5 (Standard Box)":
                     st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, "V5 Trust Flag"] = "UNRESOLVED" if status == "Unresolved" else "Buyer Overridden"
+
+                # Record human-in-the-loop buyer override audit record
+                item_code_val = st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, "Item Code"].values[0]
+                override_rec = BuyerOverrideRecord(
+                    line_no=l_no,
+                    item_code=str(item_code_val),
+                    vendor_col=col,
+                    original_value=current_val,
+                    corrected_value=converted_val if converted_val is not None else edited_val,
+                    reason=cite or f"Manual buyer override from editor: '{edited_val}'"
+                )
+                if "buyer_overrides" not in st.session_state:
+                    st.session_state.buyer_overrides = []
+                existing_idx = next(
+                    (i for i, o in enumerate(st.session_state.buyer_overrides)
+                     if o.line_no == l_no and o.vendor_col == col),
+                    None
+                )
+                if existing_idx is not None:
+                    st.session_state.buyer_overrides[existing_idx] = override_rec
+                else:
+                    st.session_state.buyer_overrides.append(override_rec)
+
                 has_changes = True
 
     if has_changes:
@@ -1135,6 +1205,41 @@ elif nav == "🎯 Live Award Scenarios Engine":
         </p>
     </div>
     """, unsafe_allow_html=True)
+
+    # Centralized Award Approval Gate Integration
+    if gate_result["is_blocked"]:
+        st.markdown(f"""
+        <div class="procure-card" style="border-left:5px solid #ef4444; background-color:#fef2f2; padding:16px 20px; margin-bottom:16px; border-radius:10px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                <h3 style="font-size:16px; font-weight:800; color:#991b1b; margin:0;">
+                    {gate_result['status_label']}
+                </h3>
+                <span style="background-color:#fee2e2; color:#b91c1c; border:1px solid #fecaca; font-size:11px; font-weight:700; padding:2px 8px; border-radius:6px; text-transform:uppercase;">
+                    Approval Gate: Blocked
+                </span>
+            </div>
+            <p style="font-size:13px; font-weight:600; color:#7f1d1d; margin:6px 0 4px 0;">
+                {gate_result['guidance_message']}
+            </p>
+            <p style="font-size:12px; color:#64748b; margin:0;">
+                Pending lines from eligible suppliers: <strong>Lines {gate_result['unresolved_lines']}</strong> (Vendor 5 on New SKUs with no historical PO baseline). Note: Disqualified Vendor 4 and Line 27 (fails moisture gate Q7) are excluded from the gate.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <div class="procure-card" style="border-left:5px solid #22c55e; background-color:#f0fdf4; padding:16px 20px; margin-bottom:16px; border-radius:10px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                <h3 style="font-size:16px; font-weight:800; color:#14532d; margin:0;">
+                    {gate_result['status_label']}
+                </h3>
+                <span class="badge-verified">Approval Ready</span>
+            </div>
+            <p style="font-size:13px; font-weight:600; color:#15803d; margin:6px 0 0 0;">
+                {gate_result['guidance_message']}
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
 
     # 4 Dynamic Scenario Cards
     s1, s2, s3, s4 = st.columns(4)
@@ -1335,110 +1440,126 @@ elif nav == "🛡️ Questionnaire Audit Gate":
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 15. VIEW 5: LIVE AI PROCUREMENT ANALYST (STRICT REASONING, NO CANNED RESPONSES)
+# 15. VIEW 5: LIVE AI PROCUREMENT ANALYST (CONNECTED TO LIVE RFX STATE)
 # ─────────────────────────────────────────────────────────────────────────────
 elif nav == "💬 AI Procurement Analyst (Live LLM)":
-    st.markdown("""
+    active_client, client_err = get_openai_client_or_status()
+    llm_connected = active_client is not None
+    badge_label = "Live OpenAI GPT-4o Connected" if llm_connected else "Deterministic Analytics Engine Connected"
+
+    st.markdown(f"""
     <div class="procure-card">
-        <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
             <div>
-                <h2 style="font-size:20px; font-weight:800; color:#0f172a; margin:0 0 4px 0;">AI Procurement Analyst (Live LLM Reasoning Engine)</h2>
+                <h2 style="font-size:20px; font-weight:800; color:#0f172a; margin:0 0 4px 0;">AI Procurement Analyst (Contextual Co-Pilot)</h2>
                 <p style="font-size:13px; color:#64748b; margin:0;">
-                    Live reasoning powered by OpenAI API with the active normalized matrix and audit database injected into context. <strong>No canned responses.</strong>
+                    Live reasoning engine connected to normalized matrix, questionnaire audit database, and award optimization engine. <strong>Grounded strictly in active application data.</strong>
                 </p>
             </div>
-            <span class="badge-verified">Live LLM Context</span>
+            <span class="badge-verified">{badge_label}</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("**Interactive Quick Inquiries:**")
-    qc1, qc2, qc3 = st.columns(3)
-    
-    chip1 = "Why is Vendor 5 marked unresolved for line 27?"
-    chip2 = "What is the cost difference if we enforce the quality gate?"
-    chip3 = "Show me the risk profile for Vendor 4."
+    # 1. Suggested Demonstration Questions (Immediately Visible and Clickable)
+    st.markdown("##### 💡 Suggested Demonstration Questions")
+    st.caption("Click any demonstration question below to trigger the live AI Analyst co-pilot grounded in active application data:")
+
+    demo_q1 = "Which vendor should we award to, and why? Compare the lowest-cost option with the quality and compliance requirements."
+    demo_q2 = "What are the key commercial and compliance risks in these quotations? Identify unresolved items that require buyer intervention."
+    demo_q3 = "Why is Scenario B recommended over Scenario C? Explain the cost difference and the dual-sourcing trade-off."
 
     user_query = None
-    with qc1:
-        if st.button(f"💬 {chip1}", use_container_width=True):
-            user_query = chip1
-    with qc2:
-        if st.button(f"💬 {chip2}", use_container_width=True):
-            user_query = chip2
-    with qc3:
-        if st.button(f"💬 {chip3}", use_container_width=True):
-            user_query = chip3
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button(
+            f"🏆 **Vendor Award & Cost of Compliance**\n\n_{demo_q1}_",
+            key="btn_demo_q1",
+            use_container_width=True
+        ):
+            user_query = demo_q1
+    with col2:
+        if st.button(
+            f"⚠️ **Commercial & Quality Risks**\n\n_{demo_q2}_",
+            key="btn_demo_q2",
+            use_container_width=True
+        ):
+            user_query = demo_q2
+    with col3:
+        if st.button(
+            f"⚖️ **Scenario B vs C Dual-Sourcing**\n\n_{demo_q3}_",
+            key="btn_demo_q3",
+            use_container_width=True
+        ):
+            user_query = demo_q3
 
+    # Toolbar with Clear Conversation
+    tb_left, tb_right = st.columns([6, 1])
+    with tb_right:
+        if st.button("🗑️ Clear Chat", key="btn_clear_chat", use_container_width=True, help="Reset conversation history"):
+            st.session_state.messages = []
+            st.rerun()
+
+    # Freeform buyer input
     custom_query = st.chat_input("Ask co-pilot about vendor quotes, active overrides, or compliance...")
     if custom_query:
         user_query = custom_query
 
-    # Display chat history
+    # Empty State Guidance (Shown when no conversation exists yet and no button clicked)
+    if not st.session_state.messages and not user_query:
+        st.markdown(f"""
+        <div style="background-color:#f8fafc; border:1px dashed #cbd5e1; border-radius:12px; padding:24px; text-align:center; margin:16px 0;">
+            <div style="font-size:32px; margin-bottom:8px;">📦 🤖</div>
+            <h4 style="font-size:16px; font-weight:700; color:#1e293b; margin:0 0 6px 0;">Live Co-Pilot Ready for Inquiry</h4>
+            <p style="font-size:13px; color:#64748b; max-width:650px; margin:0 auto 14px auto; line-height:1.5;">
+                The AI Analyst is directly wired to 30 packaging line items, 5 vendor quotations, questionnaire audit gates, and live award scenarios. 
+                Click any of the <strong>3 demonstration questions above</strong> to immediately generate analytical reasoning, or type an ad-hoc inquiry below.
+            </p>
+            <div style="display:inline-flex; gap:12px; font-size:12px; color:#475569; background:#ffffff; padding:6px 16px; border-radius:20px; border:1px solid #e2e8f0;">
+                <span>Budget: <strong>₹{live_scenarios['budget_spend']/1e7:.2f} Cr</strong></span>
+                <span>•</span>
+                <span>Scenario B Spend: <strong>₹{live_scenarios['spend_b']/1e7:.2f} Cr</strong></span>
+                <span>•</span>
+                <span>Approval Gate: <strong>{'BLOCKED' if gate_result['is_blocked'] else 'READY'}</strong></span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Render Conversation History
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+            if msg.get("engine"):
+                st.caption(f"🔧 Engine: {msg['engine']}")
 
-    # Live LLM Generation Call
+    # Handle New Query (from Demo Button or Chat Input)
     if user_query:
         st.session_state.messages.append({"role": "user", "content": user_query})
         with st.chat_message("user"):
             st.markdown(user_query)
 
-        active_client, client_err = get_openai_client_or_status()
-        if not active_client:
-            with st.chat_message("assistant"):
-                st.warning(client_err)
-                st.session_state.messages.append({"role": "assistant", "content": client_err})
-        else:
-            # Inject LIVE state of edited_df into LLM context
-            matrix_context = st.session_state.df_norm[[
-                "Line #", "Item Code", "Description", "Est. Qty", "Delivery Location", "Criticality",
-                "V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)",
-                "V1 Citation", "V2 Citation", "V3 Citation", "V4 Citation", "V5 Citation", "V5 Trust Flag"
-            ]].to_markdown(index=False)
+        with st.chat_message("assistant"):
+            with st.spinner("AI Analyst executing live analytical reasoning over current application data..."):
+                try:
+                    response_text, engine_mode = answer_query(
+                        user_query=user_query,
+                        df_matrix=st.session_state.df_norm,
+                        df_audit=st.session_state.df_gate,
+                        qualifications=current_qualifications,
+                        scenarios=live_scenarios,
+                        overrides=st.session_state.get("buyer_overrides", []),
+                        fx_rate=FX_RATE,
+                        openai_client=active_client,
+                        gate_result=gate_result
+                    )
+                except Exception as e:
+                    response_text = f"⚠️ Analyst Execution Error: {str(e)}"
+                    engine_mode = "Error State"
 
-            audit_context = st.session_state.df_gate.to_markdown(index=False)
-
-            system_instruction = f"""You are the AI Procurement Analyst co-pilot for RFx-CORR-2026-017.
-You are directly connected to the active normalized matrix and Questionnaire Audit database.
-
---- LIVE DATA CONTEXT ---
-LIVE QUOTE MATRIX & CITATIONS:
-{matrix_context}
-
-QUESTIONNAIRE AUDIT:
-{audit_context}
-
-LIVE SCENARIO SPENDS (PANDAS CALCULATED):
-- Master Budget: ₹{live_scenarios['budget_spend']:,.0f}
-- Scenario A (Unconstrained L1): ₹{live_scenarios['spend_a']:,.0f} (Net Savings: ₹{live_scenarios['savings_a']:,.0f})
-- Scenario B (Quality-Gated L1): ₹{live_scenarios['spend_b']:,.0f} (Net Savings: ₹{live_scenarios['savings_b']:,.0f})
-- Scenario C (Dual Sourcing 70/30): ₹{live_scenarios['spend_c']:,.0f}
-- Cost of Compliance: +₹{live_scenarios['cost_of_compliance']:,.0f} (+{live_scenarios['compliance_pct']:.2f}%)
-
---- CRITICAL MANDATORY INSTRUCTIONS ---
-1. You MUST base all answers strictly on the live numbers and citations provided above. DO NOT use canned responses.
-2. CRITICAL: When explaining why any price was inferred, converted, or unresolved, you MUST strictly cite the exact verbatim text from the 'Citation' fields (e.g. 'V5 Citation').
-3. If the user asks about an UNRESOLVED cell (e.g. Vendor 5 on Line 27 or other New SKUs), explicitly refuse to assume a landed cost and state: 'The quote is UNRESOLVED because it quoted Same as last year on a New SKU with no historical PO reference.' Mention that Line 27 also failed Gate Q7 for moisture barrier.
-4. Keep responses concise, high-trust, and executive-ready.
-"""
-
-            with st.chat_message("assistant"):
-                with st.spinner("AI Analyst executing live reasoning over current screen data..."):
-                    try:
-                        completion = active_client.chat.completions.create(
-                            model="gpt-4o",
-                            messages=[
-                                {"role": "system", "content": system_instruction},
-                                {"role": "user", "content": user_query}
-                            ],
-                            temperature=0.1
-                        )
-                        response_text = completion.choices[0].message.content
-                    except Exception as e:
-                        diag_msg = format_openai_api_error(e)
-                        response_text = f"⚠️ OpenAI Service Error: {diag_msg}"
-
-                    st.markdown(response_text)
-                    st.session_state.messages.append({"role": "assistant", "content": response_text})
+                st.markdown(response_text)
+                st.caption(f"🔧 Engine: {engine_mode}")
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": response_text,
+                    "engine": engine_mode
+                })

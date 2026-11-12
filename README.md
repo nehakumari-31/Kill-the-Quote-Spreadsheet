@@ -16,16 +16,23 @@ An enterprise-grade **AI-Powered Procurement Co-pilot** designed for a category 
 3. **Award Scenarios & Spend Analytics:**
    - Plotly bar chart comparing total spend across Master Budget (₹4.00 Cr), Scenario A: Unconstrained L1 (₹3.77 Cr), Scenario B: Quality-Gated L1 (₹3.80 Cr), and Scenario C: Dual Sourced (₹3.81 Cr).
    - **Cost of Compliance** card showing the +₹2,74,585 (+0.73%) premium to eliminate quality risk.
-4. **Vendor Eligibility Gate:**
-   - Full questionnaire audit matrix from `Questionnaire Audit & Gate`.
-   - Dedicated red alert box for **Vendor 4 (Sri Balaji Packaging)** highlighting expired ISO 9001:2015 certificate and low capacity.
-   - Partial gate callouts for Vendor 3 (7-ply capability) and Vendor 5 (moisture-barrier).
-5. **AI Procurement Analyst (Interactive Co-pilot):**
-   - Interactive chat interface with 3 pre-populated query chips citing ground truth data:
-     - *"Why is Vendor 5 marked unresolved for line 27?"*
-     - *"What is the cost difference if we enforce the quality gate?"*
-     - *"Show me the risk profile for Vendor 4."*
-   - Freeform chat prompt for buyer ad-hoc questions.
+4. **Centralized Award Approval Gate & Vendor Eligibility:**
+   - Single source of truth gate (`evaluate_award_approval_gate`) integrated across Overview, Award Screen, and AI Analyst.
+   - Dynamically counts unresolved lines from eligible bidders (Lines 25, 28, 29, 30 for Vendor 5 on New SKUs with no PO history).
+   - Excludes genuinely disqualified/ineligible suppliers (Vendor 4 globally, Vendor 5 on Line 27 for moisture barrier).
+   - Clear gate status display:
+     - `Award on Scenario B — BLOCKED pending 4 unresolved lines.`
+     - `Buyer clarification or documented override required before award approval.`
+   - Smooth transition to `Award on Scenario B — Approval Ready` upon human-in-the-loop buyer overrides with audit logging.
+   - Preserves core recommendation on Scenario B throughout.
+5. **AI Procurement Analyst (Submission-Ready Co-Pilot):**
+   - Interactive conversation interface with 3 demonstration questions immediately clickable (no typing required):
+     - *"Which vendor should we award to, and why? Compare the lowest-cost option with the quality and compliance requirements."*
+     - *"What are the key commercial and compliance risks in these quotations? Identify unresolved items that require buyer intervention."*
+     - *"Why is Scenario B recommended over Scenario C? Explain the cost difference and the dual-sourcing trade-off."*
+   - Displays questions and live generated answers in the conversation history with session persistence.
+   - Dual-engine architecture: Live OpenAI GPT-4o when API key is provided, and deterministic analytical engine grounded in active matrix, audit gates, and award spends when offline. No canned outputs.
+   - Freeform chat input for ad-hoc buyer inquiries.
 
 ---
 

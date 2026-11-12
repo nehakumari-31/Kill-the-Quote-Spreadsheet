@@ -630,3 +630,128 @@ def calculate_award_scenarios(
         "discounts_evaluated_c": discounts_evaluated_c,
         "max_supplier_share_enforced": max_single_vendor_share
     }
+
+
+def evaluate_award_approval_gate(
+    df_matrix: pd.DataFrame,
+    qualifications: Dict[str, VendorQualification],
+    overrides: Optional[List[Any]] = None
+) -> Dict[str, Any]:
+    """
+    Centralized award approval gate function.
+    Reused across Overview, Award screen, and Executive Summary.
+
+    Rules:
+    1. Count unresolved quotation lines dynamically.
+    2. Unresolved means a required quote value or required commercial input remains unresolved.
+    3. Exclude genuinely ineligible or disqualified vendors from the unresolved count.
+    4. A buyer override must resolve the relevant issue only when a valid override and audit record exist.
+    5. If unresolved items remain, approval must be blocked.
+       Display: "Award on Scenario B — BLOCKED pending X unresolved lines."
+       Also display: "Buyer clarification or documented override required before award approval."
+    6. When no blocking unresolved items remain, display the approval-ready state.
+    7. Do not change the actual award recommendation merely to bypass the gate.
+    """
+    vendor_cols = _get_vendor_columns(df_matrix, qualifications)
+
+    # Build map of valid buyer overrides that resolve quotes
+    valid_overrides = {}
+    if overrides:
+        for o in overrides:
+            l_num = getattr(o, "line_no", None) if hasattr(o, "line_no") else (o.get("line_no") if isinstance(o, dict) else None)
+            v_col = getattr(o, "vendor_col", None) if hasattr(o, "vendor_col") else (o.get("vendor_col") if isinstance(o, dict) else None)
+            corr_val = getattr(o, "corrected_value", None) if hasattr(o, "corrected_value") else (o.get("corrected_value") if isinstance(o, dict) else None)
+            reason = getattr(o, "reason", None) if hasattr(o, "reason") else (o.get("reason") if isinstance(o, dict) else None)
+
+            is_resolving = (
+                corr_val is not None
+                and not pd.isna(corr_val)
+                and str(corr_val).strip().upper() != "UNRESOLVED"
+                and str(corr_val).strip() != ""
+            )
+            has_audit = bool(reason and str(reason).strip())
+
+            if is_resolving and has_audit and l_num is not None and v_col:
+                v_id = _extract_vendor_id(str(v_col))
+                valid_overrides[(int(l_num), v_id)] = o
+
+    unresolved_lines = set()
+    unresolved_details = []
+
+    for _, row in df_matrix.iterrows():
+        raw_l = row.get("Line #")
+        if pd.isna(raw_l):
+            continue
+        try:
+            l_no = int(raw_l)
+        except (ValueError, TypeError):
+            continue
+
+        for col in vendor_cols:
+            v_id = _extract_vendor_id(col)
+
+            # Rule 3: Exclude genuinely ineligible or disqualified vendors from the unresolved count
+            if not is_vendor_eligible_for_line(v_id, l_no, qualifications):
+                continue
+
+            # Rule 4: A buyer override must resolve the relevant issue only when a valid override and audit record exist
+            if (l_no, v_id) in valid_overrides:
+                continue
+
+            # Rule 2: Unresolved means a required quote value or required commercial input remains unresolved
+            val = row.get(col)
+            status_val = str(row.get(f"{v_id} Status", "")).strip().lower()
+            cite_val = str(row.get(f"{v_id} Citation", "")).strip().lower()
+            reason_val = str(row.get(f"{v_id} Unresolved Reason", "")).strip().lower()
+            trust_val = str(row.get(f"{v_id} Trust Flag", "")).strip().lower()
+
+            is_unres = False
+            unres_msg = ""
+            if status_val in ["unresolved", "needs review"]:
+                is_unres = True
+                unres_msg = str(row.get(f"{v_id} Unresolved Reason") or row.get(f"{v_id} Citation") or "Unresolved quote status")
+            elif "unresolved" in cite_val:
+                is_unres = True
+                unres_msg = str(row.get(f"{v_id} Citation"))
+            elif "unresolved" in reason_val:
+                is_unres = True
+                unres_msg = str(row.get(f"{v_id} Unresolved Reason"))
+            elif "unresolved" in trust_val:
+                is_unres = True
+                unres_msg = f"{col} flagged as UNRESOLVED"
+            elif pd.isna(val) or val is None:
+                if "unresolved" in cite_val or "unresolved" in reason_val or status_val in ["unresolved", "needs review"]:
+                    is_unres = True
+                    unres_msg = str(row.get(f"{v_id} Unresolved Reason") or row.get(f"{v_id} Citation") or "Missing required quote value")
+
+            if is_unres:
+                unresolved_lines.add(l_no)
+                unresolved_details.append({
+                    "line_no": l_no,
+                    "item_code": row.get("Item Code", f"CP-{l_no:03d}"),
+                    "description": row.get("Description", ""),
+                    "vendor_id": v_id,
+                    "vendor_col": col,
+                    "reason": unres_msg
+                })
+
+    unres_count = len(unresolved_lines)
+    is_blocked = unres_count > 0
+
+    if is_blocked:
+        status_label = f"Award on Scenario B — BLOCKED pending {unres_count} unresolved lines."
+        guidance_message = "Buyer clarification or documented override required before award approval."
+    else:
+        status_label = "Award on Scenario B — Approval Ready"
+        guidance_message = "All required quotation lines resolved and verified. Ready for commercial award approval."
+
+    return {
+        "is_blocked": is_blocked,
+        "unresolved_line_count": unres_count,
+        "unresolved_lines": sorted(list(unresolved_lines)),
+        "unresolved_details": unresolved_details,
+        "status_label": status_label,
+        "guidance_message": guidance_message,
+        "recommendation": "Award on Scenario B (Quality-Gated L1)",
+        "target_scenario": "Scenario B"
+    }
