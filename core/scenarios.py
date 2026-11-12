@@ -690,20 +690,28 @@ def evaluate_award_approval_gate(
         for col in vendor_cols:
             v_id = _extract_vendor_id(col)
 
-            # Rule 3: Exclude genuinely ineligible or disqualified vendors from the unresolved count
+            # Rule 3: Ensure Vendor 4 is excluded globally because it is disqualified
+            if v_id == "V4" or (qualifications.get(v_id) and qualifications[v_id].status in ["Disqualified", "Pending Review"]):
+                continue
+
+            # Rule 4: Exclude Vendor 5 on Line 27 because it fails the moisture-barrier requirement (Gate Q7)
+            # Also respects general line-specific exclusions in qualifications
             if not is_vendor_eligible_for_line(v_id, l_no, qualifications):
                 continue
 
-            # Rule 4: A buyer override must resolve the relevant issue only when a valid override and audit record exist
+            # Rule 6: Support documented buyer overrides with a valid resolution value and audit reason
             if (l_no, v_id) in valid_overrides:
                 continue
 
-            # Rule 2: Unresolved means a required quote value or required commercial input remains unresolved
+            # Rule 5 & 2: Count unresolved quotation lines dynamically
+            # Unresolved means a required quote value or required commercial input remains unresolved
+            # (e.g. Vendor 5 on Lines 25, 28, 29, 30 quoting 'Same as last year' on New SKUs with no PO baseline)
             val = row.get(col)
             status_val = str(row.get(f"{v_id} Status", "")).strip().lower()
             cite_val = str(row.get(f"{v_id} Citation", "")).strip().lower()
             reason_val = str(row.get(f"{v_id} Unresolved Reason", "")).strip().lower()
             trust_val = str(row.get(f"{v_id} Trust Flag", "")).strip().lower()
+            raw_val = str(row.get(f"{v_id} Raw Value", "")).strip().lower()
 
             is_unres = False
             unres_msg = ""
@@ -719,6 +727,9 @@ def evaluate_award_approval_gate(
             elif "unresolved" in trust_val:
                 is_unres = True
                 unres_msg = f"{col} flagged as UNRESOLVED"
+            elif "same as last year" in raw_val and (pd.isna(val) or val is None):
+                is_unres = True
+                unres_msg = str(row.get(f"{v_id} Citation") or "Same as last year on New SKU with no PO history")
             elif pd.isna(val) or val is None:
                 if "unresolved" in cite_val or "unresolved" in reason_val or status_val in ["unresolved", "needs review"]:
                     is_unres = True

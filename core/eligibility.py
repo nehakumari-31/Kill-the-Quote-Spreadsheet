@@ -359,9 +359,3 @@ def is_vendor_eligible_for_line(
         return False
     return True
 
-
-def evaluate_award_approval_gate(*args, **kwargs):
-    """Convenience alias to centralized evaluate_award_approval_gate in core.scenarios."""
-    from core.scenarios import evaluate_award_approval_gate as _impl
-    return _impl(*args, **kwargs)
-
