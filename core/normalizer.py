@@ -547,3 +547,130 @@ def normalize_price(
         discount_condition=discount_condition,
         unresolved_reason=None
     )
+
+
+def prepare_quote_editor_df(
+    df_norm: pd.DataFrame,
+    editor_cols: List[str],
+    vendor_cols: List[str]
+) -> pd.DataFrame:
+    """
+    Prepares a display and editing DataFrame for Streamlit's st.data_editor.
+    Converts vendor price columns into object/string representations that:
+    - Display formatted prices (e.g. '6.12') for verified quotes.
+    - Display 'UNRESOLVED' for unresolved, missing, or unverified quotes requiring buyer review.
+    - Use string data kinds so that st.column_config.TextColumn is 100% compatible with Streamlit.
+    - Preserves all non-vendor columns with their native types.
+    """
+    display_df = df_norm[editor_cols].copy()
+    for col in vendor_cols:
+        if col not in display_df.columns:
+            continue
+        v_code = col.split()[0]
+        status_col = f"{v_code} Status"
+        trust_col = "V5 Trust Flag" if col.startswith("V5") else None
+
+        formatted_vals = []
+        for _, row in df_norm.iterrows():
+            val = row.get(col)
+            stat = row.get(status_col)
+            trust = row.get(trust_col) if trust_col else None
+
+            # If status is Unresolved, or trust flag is UNRESOLVED, or val is null/NaN
+            if stat == "Unresolved" or trust == "UNRESOLVED" or pd.isna(val):
+                formatted_vals.append("UNRESOLVED")
+            else:
+                formatted_vals.append(f"{float(val):.2f}")
+        display_df[col] = formatted_vals
+    return display_df
+
+
+def parse_vendor_cell_edit(
+    edited_val: Any,
+    current_val: Any,
+    line_no: int,
+    delivery_location: Optional[str] = None,
+    item_weight_kg: Optional[float] = None,
+    is_new_sku: bool = False,
+    fx_rate: Optional[float] = None,
+    freight_rates: Optional[Dict[str, float]] = None
+) -> Tuple[Optional[float], str, Optional[str], Optional[str], bool]:
+    """
+    Parses a user edit from the Streamlit Quote Comparison Matrix data editor.
+    Safely converts edited string representations back into expected typed values.
+
+    Returns:
+    (converted_numeric_price, status, citation, unresolved_reason, has_changed)
+
+    - If unchanged: has_changed=False, preserves existing values.
+    - If cleared / null: has_changed=True (if was notna), returns (None, 'Unresolved', ...).
+    - If 'UNRESOLVED': has_changed=True (if was notna), returns (None, 'Unresolved', ...).
+    - If valid numeric or formula (e.g. '12.50', '₹42/kg', '$0.15'): runs through normalize_price,
+      returning the numeric landed float, 'Verified' status, and audit citation.
+    """
+    # 1. Null / empty / cleared cell
+    if edited_val is None or pd.isna(edited_val) or str(edited_val).strip() in ["", "none", "null", "nan"]:
+        if pd.notna(current_val):
+            return None, "Unresolved", "Buyer Overridden: Value cleared", "Buyer cleared quotation value", True
+        return None, "Unresolved", None, "Unresolved quote", False
+
+    edited_str = str(edited_val).strip()
+
+    # 2. Check if unchanged numeric value
+    if pd.notna(current_val):
+        try:
+            numeric_check = float(edited_str.replace("₹", "").replace("$", "").replace(",", "").strip())
+            if abs(numeric_check - float(current_val)) < 1e-4:
+                return float(current_val), "Verified", None, None, False
+        except ValueError:
+            pass
+
+    # 3. Explicit UNRESOLVED status
+    if edited_str.upper() == "UNRESOLVED":
+        if pd.notna(current_val):
+            return None, "Unresolved", "Buyer Overridden: Explicitly set to UNRESOLVED", "Buyer marked line as Unresolved", True
+        return None, "Unresolved", None, "Unresolved quote requiring buyer review", False
+
+    # 4. Infer unit and currency from user string input
+    lower_str = edited_str.lower()
+    if any(k in lower_str for k in ["/kg", "per kg", "₹/kg", "rs/kg", "inr/kg", "kg"]):
+        raw_unit = "₹/kg"
+        raw_curr = "INR"
+    elif any(k in lower_str for k in ["1000", "per 1000", "/1000", "thousand"]):
+        raw_unit = "per 1,000 Nos"
+        raw_curr = "INR"
+    elif any(k in lower_str for k in ["/sqm", "per sqm", "sqm", "m2"]):
+        raw_unit = "sqm"
+        raw_curr = "INR"
+    elif "usd" in lower_str or "$" in lower_str:
+        raw_unit = "Nos"
+        raw_curr = "USD"
+    else:
+        raw_unit = "Nos"
+        raw_curr = "INR"
+
+    norm_res = normalize_price(
+        raw_value=edited_str,
+        raw_unit=raw_unit,
+        raw_currency=raw_curr,
+        line_no=line_no,
+        delivery_location=delivery_location,
+        item_weight_kg=item_weight_kg,
+        is_new_sku=is_new_sku,
+        fx_rate=fx_rate or DEFAULT_FX_RATE,
+        freight_rates=freight_rates or DEFAULT_FREIGHT_RATES,
+        freight_included=False
+    )
+
+    cite = f"Buyer Overridden: '{edited_str}' -> {norm_res.formula_citation}"
+
+    if norm_res.status == "Verified" and norm_res.normalized_price is not None:
+        new_val = float(norm_res.normalized_price)
+        if pd.isna(current_val) or abs(new_val - float(current_val)) > 1e-4:
+            return new_val, "Verified", cite, None, True
+        return float(current_val), "Verified", None, None, False
+    else:
+        # Normalization failed or unresolved
+        if pd.notna(current_val):
+            return None, "Unresolved", cite, norm_res.unresolved_reason, True
+        return None, "Unresolved", cite, norm_res.unresolved_reason, False

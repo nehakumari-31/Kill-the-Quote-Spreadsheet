@@ -172,7 +172,9 @@ from core.normalizer import (
     normalize_price,
     parse_uom,
     validate_technical_specification,
-    calculate_price_per_kg
+    calculate_price_per_kg,
+    prepare_quote_editor_df,
+    parse_vendor_cell_edit
 )
 from core.eligibility import (
     evaluate_vendor_qualifications,
@@ -944,9 +946,14 @@ elif nav == "📊 Quote Comparison Matrix & Editor":
         "Line #", "Item Code", "Description", "Est. Qty", "Delivery Location", "Criticality", "Budget Price",
         "V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)", "V5 Trust Flag"
     ]
+    vendor_cols = ["V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)"]
+
+    # Build display DataFrame: format vendor quote columns as text compatible with st.column_config.TextColumn
+    # Preserves underlying st.session_state.df_norm as numeric float for calculations
+    display_df = prepare_quote_editor_df(st.session_state.df_norm, editor_cols, vendor_cols)
 
     edited_df = st.data_editor(
-        st.session_state.df_norm[editor_cols],
+        display_df,
         use_container_width=True,
         height=450,
         disabled=["Line #", "Item Code", "Description", "Est. Qty", "Delivery Location", "Criticality", "Budget Price", "V5 Trust Flag"],
@@ -956,12 +963,13 @@ elif nav == "📊 Quote Comparison Matrix & Editor":
             "Description": st.column_config.TextColumn(width="medium"),
             "Est. Qty": st.column_config.NumberColumn(format="%d"),
             "Delivery Location": st.column_config.TextColumn(width="medium"),
+            "Criticality": st.column_config.TextColumn(width="small"),
             "Budget Price": st.column_config.NumberColumn(format="₹%.2f"),
-            "V1 (Apex)": st.column_config.NumberColumn(format="₹%.2f"),
-            "V2 (PackTech)": st.column_config.NumberColumn(format="₹%.2f"),
-            "V3 (Global USD)": st.column_config.NumberColumn(format="₹%.2f"),
-            "V4 (Balaji)": st.column_config.NumberColumn(format="₹%.2f"),
-            "V5 (Standard Box)": st.column_config.TextColumn(help="Type a number or '₹42/kg' to test live recalculation!"),
+            "V1 (Apex)": st.column_config.TextColumn(help="Apex quoted/normalized price. Enter number, formula (e.g. '₹42/kg'), or 'UNRESOLVED'."),
+            "V2 (PackTech)": st.column_config.TextColumn(help="PackTech quoted/normalized price. Enter number, formula, or 'UNRESOLVED'."),
+            "V3 (Global USD)": st.column_config.TextColumn(help="Global USD quoted/normalized price. Enter number, formula, or 'UNRESOLVED'."),
+            "V4 (Balaji)": st.column_config.TextColumn(help="Balaji quoted/normalized price (ISO Expired). Enter number, formula, or 'UNRESOLVED'."),
+            "V5 (Standard Box)": st.column_config.TextColumn(help="Standard Box quoted/normalized price. Enter number, formula (e.g. '₹42/kg'), or 'UNRESOLVED'."),
             "V5 Trust Flag": st.column_config.TextColumn(width="medium")
         }
     )
@@ -974,48 +982,30 @@ elif nav == "📊 Quote Comparison Matrix & Editor":
         c_wt = st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, "Est. Wt (kg)"].values[0]
         is_new = l_no in [25, 27, 28, 29, 30]
 
-        for col in ["V1 (Apex)", "V2 (PackTech)", "V3 (Global USD)", "V4 (Balaji)", "V5 (Standard Box)"]:
+        for col in vendor_cols:
             current_val = st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, col].values[0]
             edited_val = row[col]
             v_code = col.split()[0]
 
-            if pd.isna(edited_val) or str(edited_val).strip() == "":
-                continue
-
-            # Run normalization math through core.normalizer (single source of truth)
-            norm_res = normalize_price(
-                raw_value=edited_val,
-                raw_unit=None,
-                raw_currency="INR",
+            converted_val, status, cite, unres_reason, changed = parse_vendor_cell_edit(
+                edited_val=edited_val,
+                current_val=current_val,
                 line_no=l_no,
                 delivery_location=d_loc,
                 item_weight_kg=c_wt,
                 is_new_sku=is_new,
                 fx_rate=FX_RATE,
-                freight_rates=FREIGHT_RATES,
-                freight_included=False
+                freight_rates=FREIGHT_RATES
             )
-            converted_val = norm_res.normalized_price
-            flag = "Buyer Overridden" if norm_res.status == "Verified" else norm_res.trust_flag
-            cite = f"Buyer Overridden: '{edited_val}' -> {norm_res.formula_citation}"
 
-            if pd.notna(converted_val) and (pd.isna(current_val) or abs(float(converted_val) - float(current_val)) > 1e-4):
-                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, col] = converted_val
-                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Citation"] = cite
+            if changed:
+                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, col] = converted_val if converted_val is not None else np.nan
+                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Citation"] = cite or f"Buyer Overridden: '{edited_val}'"
                 st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Raw Value"] = edited_val
-                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Status"] = norm_res.status
-                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Unresolved Reason"] = norm_res.unresolved_reason
+                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Status"] = status
+                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Unresolved Reason"] = unres_reason
                 if col == "V5 (Standard Box)":
-                    st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, "V5 Trust Flag"] = flag
-                has_changes = True
-            elif norm_res.status == "Unresolved" and pd.notna(current_val):
-                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, col] = np.nan
-                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Citation"] = cite
-                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Raw Value"] = edited_val
-                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Status"] = "Unresolved"
-                st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, f"{v_code} Unresolved Reason"] = norm_res.unresolved_reason
-                if col == "V5 (Standard Box)":
-                    st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, "V5 Trust Flag"] = "UNRESOLVED"
+                    st.session_state.df_norm.loc[st.session_state.df_norm["Line #"] == l_no, "V5 Trust Flag"] = "UNRESOLVED" if status == "Unresolved" else "Buyer Overridden"
                 has_changes = True
 
     if has_changes:
