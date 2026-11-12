@@ -1290,7 +1290,20 @@ elif nav == "📊 Quote Comparison Matrix & Editor":
             </p>
         </div>
         """, unsafe_allow_html=True)
-        st.dataframe(pd.DataFrame(unresolved_rows), use_container_width=True, hide_index=True)
+        st.dataframe(
+            pd.DataFrame(unresolved_rows),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Line #": st.column_config.NumberColumn(format="%d", width="small"),
+                "Item Code": st.column_config.TextColumn(width="small"),
+                "Vendor": st.column_config.TextColumn(width="small"),
+                "Raw Quoted Value": st.column_config.TextColumn(width="medium"),
+                "Raw UOM": st.column_config.TextColumn(width="small"),
+                "Reason for Unresolved Status": st.column_config.TextColumn(width="large"),
+                "Audit Evidence": st.column_config.TextColumn(width="large"),
+            }
+        )
 
     # Traceability & Source Citation Inspector
     st.markdown("### 🔍 Live Source Citation Inspector (Raw Extraction Traceability)")
@@ -1597,7 +1610,19 @@ elif nav == "🎯 Live Award Scenarios Engine":
                 "Discount Not Applied & Reason": d.get("discount_not_applied_reason") or "N/A (Discount Applied)",
                 "Final Award Amount": f"₹{d.get('final_award_amount', 0.0):,.2f}"
             })
-        st.dataframe(pd.DataFrame(disc_rows), use_container_width=True, hide_index=True)
+        st.dataframe(
+            pd.DataFrame(disc_rows),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Vendor": st.column_config.TextColumn(width="medium"),
+                "Original Quoted Amount": st.column_config.TextColumn(width="medium"),
+                "Eligible Discount": st.column_config.TextColumn(width="small"),
+                "Discount Applied": st.column_config.TextColumn(width="medium"),
+                "Discount Not Applied & Reason": st.column_config.TextColumn(width="large"),
+                "Final Award Amount": st.column_config.TextColumn(width="medium"),
+            }
+        )
 
     # Detailed Line Item Allocation Tables
     col_hdr, col_exp = st.columns([3, 1])
