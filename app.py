@@ -955,49 +955,128 @@ if nav == "🏠 Overview & Recommendation":
     </div>
     """, unsafe_allow_html=True)
 
-    # 4 Dynamic KPI Cards
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
+    # Dynamic Spend Comparison Across All Three Award Scenarios (A, B, and C)
+    sc1, sc2, sc3 = st.columns(3)
+    with sc1:
         st.markdown(f"""
-        <div class="procure-card" style="padding:16px;">
-            <div class="stat-label">Scenario A (Unconstrained L1)</div>
+        <div class="procure-card" style="padding:16px; border-left:4px solid #3b82f6;">
+            <div class="stat-label" style="color:#2563eb;">Scenario A: Unconstrained L1</div>
             <div class="stat-number">₹{live_scenarios['spend_a']/1e7:.2f} Cr</div>
             <div style="font-size:11px; color:#15803d; font-weight:600; margin-top:4px;">
-                Saves ₹{live_scenarios['savings_a']/1e5:.2f} L ({(live_scenarios['savings_a']/live_scenarios['budget_spend'])*100:.2f}%)
+                Saves ₹{live_scenarios['savings_a']/1e5:.2f} L ({live_scenarios['savings_pct_a']:.2f}%) vs Budget
+            </div>
+            <div style="font-size:11px; color:#64748b; font-weight:600; margin-top:2px;">
+                Baseline (Lowest raw quotes)
+            </div>
+            <div style="font-size:11px; color:#b91c1c; font-weight:600; margin-top:6px;">
+                ⚠ High Risk: Awards 14 lines to uncertified V4
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    with sc2:
+        st.markdown(f"""
+        <div class="procure-card-highlight" style="padding:16px; border-left:4px solid #22c55e;">
+            <div class="stat-label" style="color:#15803d;">Scenario B: Quality-Gated L1 ★</div>
+            <div class="stat-number" style="color:#15803d;">₹{live_scenarios['spend_b']/1e7:.2f} Cr</div>
+            <div style="font-size:11px; color:#15803d; font-weight:700; margin-top:4px;">
+                Saves ₹{live_scenarios['savings_b']/1e5:.2f} L ({live_scenarios['savings_pct_b']:.2f}%) vs Budget
+            </div>
+            <div style="font-size:11px; color:#b45309; font-weight:700; margin-top:2px;">
+                +₹{live_scenarios['cost_diff_b_vs_a']:,.0f} (+{live_scenarios['pct_diff_b_vs_a']:.2f}% higher than Scenario A)
+            </div>
+            <div style="font-size:11px; color:#15803d; font-weight:600; margin-top:6px;">
+                ✓ Recommended: 100% Qualified L1 Allocation
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    with sc3:
+        st.markdown(f"""
+        <div class="procure-card" style="padding:16px; border-left:4px solid #a855f7;">
+            <div class="stat-label" style="color:#7e22ce;">Scenario C: Dual Sourcing (70/30)</div>
+            <div class="stat-number" style="color:#7e22ce;">₹{live_scenarios['spend_c']/1e7:.2f} Cr</div>
+            <div style="font-size:11px; color:#15803d; font-weight:600; margin-top:4px;">
+                Saves ₹{live_scenarios['savings_c']/1e5:.2f} L ({live_scenarios['savings_pct_c']:.2f}%) vs Budget
+            </div>
+            <div style="font-size:11px; color:#7e22ce; font-weight:700; margin-top:2px;">
+                +₹{live_scenarios['cost_diff_c_vs_a']:,.0f} (+{live_scenarios['pct_diff_c_vs_a']:.2f}% higher than Scenario A)
+            </div>
+            <div style="font-size:11px; color:#6b21a8; font-weight:600; margin-top:6px;">
+                🛡 Risk Hedge: +₹{live_scenarios['cost_diff_c_vs_b']:,.0f} (+{live_scenarios['pct_diff_c_vs_b']:.2f}% vs B) on 5 Critical SKUs
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # 2 Governance & Approval Gate Metric Cards
+    k1, k2 = st.columns(2)
+    with k1:
+        st.markdown(f"""
+        <div class="procure-card" style="padding:14px 18px;">
+            <div class="stat-label">Cost of Compliance (Scenario B vs A)</div>
+            <div class="stat-number" style="color:#b45309;">+₹{live_scenarios['cost_of_compliance']:,.0f}</div>
+            <div style="font-size:11px; color:#b45309; font-weight:600; margin-top:4px;">
+                +{live_scenarios['compliance_pct']:.2f}% higher than Scenario A · Premium to eliminate uncertified Vendor 4 & ensure 100% technical compliance
             </div>
         </div>
         """, unsafe_allow_html=True)
     with k2:
-        st.markdown(f"""
-        <div class="procure-card-highlight" style="padding:16px;">
-            <div class="stat-label" style="color:#15803d;">Scenario B (Quality-Gated L1) ★</div>
-            <div class="stat-number" style="color:#15803d;">₹{live_scenarios['spend_b']/1e7:.2f} Cr</div>
-            <div style="font-size:11px; color:#15803d; font-weight:700; margin-top:4px;">
-                Saves ₹{live_scenarios['savings_b']/1e5:.2f} L ({(live_scenarios['savings_b']/live_scenarios['budget_spend'])*100:.2f}%) vs Budget · +{live_scenarios.get('pct_diff_b_vs_a', ((live_scenarios['spend_b']-live_scenarios['spend_a'])/live_scenarios['spend_a'])*100):.2f}% higher than Scenario A
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-    with k3:
-        st.markdown(f"""
-        <div class="procure-card" style="padding:16px;">
-            <div class="stat-label">Cost of Compliance (B vs A)</div>
-            <div class="stat-number" style="color:#b45309;">+₹{live_scenarios['cost_of_compliance']:,.0f}</div>
-            <div style="font-size:11px; color:#b45309; font-weight:600; margin-top:4px;">
-                +{live_scenarios['compliance_pct']:.2f}% higher than Scenario A
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-    with k4:
         unres_lines_count = gate_result["unresolved_line_count"]
         st.markdown(f"""
-        <div class="procure-card" style="padding:16px;">
-            <div class="stat-label">Unresolved Lines (Approval Gate)</div>
+        <div class="procure-card" style="padding:14px 18px;">
+            <div class="stat-label">Unresolved Lines (Centralized Approval Gate)</div>
             <div class="stat-number" style="color:{'#b91c1c' if gate_result['is_blocked'] else '#15803d'};">{unres_lines_count}</div>
-            <div style="font-size:11px; color:#64748b; margin-top:4px;">
-                {'BLOCKED — Buyer action needed' if gate_result['is_blocked'] else 'Approval Ready: 0 blocking lines'}
+            <div style="font-size:11px; color:{'#b91c1c' if gate_result['is_blocked'] else '#15803d'}; font-weight:600; margin-top:4px;">
+                {'⛔ BLOCKED — Buyer action needed on blocking lines' if gate_result['is_blocked'] else '✓ Approval Ready: 0 blocking lines'}
             </div>
         </div>
         """, unsafe_allow_html=True)
+
+    # Spend Comparison & Trade-off Matrix Table
+    st.markdown(f"""
+    <div class="procure-card" style="padding:14px 18px; margin-top:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+            <div style="font-size:13px; font-weight:700; color:#1e293b;">Spend Comparison & Trade-off Matrix (Scenarios A, B & C)</div>
+            <span style="font-size:11px; color:#64748b; font-weight:600;">Dynamic Engine Results · Budget: ₹{live_scenarios['budget_spend']/1e7:.2f} Cr</span>
+        </div>
+        <table style="width:100%; border-collapse:collapse; font-size:12px; text-align:left;">
+            <thead>
+                <tr style="border-bottom:2px solid #e2e8f0; color:#475569;">
+                    <th style="padding:8px;">Award Scenario</th>
+                    <th style="padding:8px;">Total Spend</th>
+                    <th style="padding:8px;">Net Savings vs Budget</th>
+                    <th style="padding:8px;">Cost Diff vs Scenario A</th>
+                    <th style="padding:8px;">Cost Diff vs Scenario B</th>
+                    <th style="padding:8px;">Allocation Strategy & Strategic Trade-off</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr style="border-bottom:1px solid #f1f5f9;">
+                    <td style="padding:8px; font-weight:700; color:#2563eb;">Scenario A (Unconstrained L1)</td>
+                    <td style="padding:8px; font-weight:600;">₹{live_scenarios['spend_a']/1e7:.2f} Cr</td>
+                    <td style="padding:8px; color:#15803d; font-weight:600;">₹{live_scenarios['savings_a']/1e5:.2f} L ({live_scenarios['savings_pct_a']:.2f}%)</td>
+                    <td style="padding:8px; color:#64748b;">Baseline (₹0)</td>
+                    <td style="padding:8px; color:#64748b;">-₹{live_scenarios['cost_diff_b_vs_a']:,.0f} (-{live_scenarios['pct_diff_b_vs_a']:.2f}%)</td>
+                    <td style="padding:8px; color:#b91c1c;">Theoretical lowest raw cost. <strong>Non-compliant</strong>: allocates 14 lines to uncertified Vendor 4.</td>
+                </tr>
+                <tr style="border-bottom:1px solid #f1f5f9; background-color:#f0fdf4;">
+                    <td style="padding:8px; font-weight:800; color:#15803d;">Scenario B (Quality-Gated L1) ★</td>
+                    <td style="padding:8px; font-weight:800; color:#15803d;">₹{live_scenarios['spend_b']/1e7:.2f} Cr</td>
+                    <td style="padding:8px; color:#15803d; font-weight:700;">₹{live_scenarios['savings_b']/1e5:.2f} L ({live_scenarios['savings_pct_b']:.2f}%)</td>
+                    <td style="padding:8px; font-weight:700; color:#b45309;">+₹{live_scenarios['cost_diff_b_vs_a']:,.0f} (+{live_scenarios['pct_diff_b_vs_a']:.2f}%)</td>
+                    <td style="padding:8px; color:#15803d; font-weight:700;">Baseline Recommended (₹0)</td>
+                    <td style="padding:8px; color:#15803d;"><strong>Recommended baseline</strong>: 100% award to lowest qualified vendor per line. Maximizes qualified savings with zero quality violations.</td>
+                </tr>
+                <tr style="background-color:#faf5ff;">
+                    <td style="padding:8px; font-weight:700; color:#7e22ce;">Scenario C (Dual Sourcing 70/30)</td>
+                    <td style="padding:8px; font-weight:700; color:#7e22ce;">₹{live_scenarios['spend_c']/1e7:.2f} Cr</td>
+                    <td style="padding:8px; color:#15803d; font-weight:600;">₹{live_scenarios['savings_c']/1e5:.2f} L ({live_scenarios['savings_pct_c']:.2f}%)</td>
+                    <td style="padding:8px; font-weight:700; color:#7e22ce;">+₹{live_scenarios['cost_diff_c_vs_a']:,.0f} (+{live_scenarios['pct_diff_c_vs_a']:.2f}%)</td>
+                    <td style="padding:8px; font-weight:700; color:#7e22ce;">+₹{live_scenarios['cost_diff_c_vs_b']:,.0f} (+{live_scenarios['pct_diff_c_vs_b']:.2f}%)</td>
+                    <td style="padding:8px; color:#581c87;"><strong>Business continuity insurance</strong>: Splits 5 Criticality A lines 70/30 between L1 & L2 qualified suppliers to mitigate single point of failure risk.</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    """, unsafe_allow_html=True)
 
     # Executive Recommendation with Centralized Approval Gate Integration
     if gate_result["is_blocked"]:
@@ -1022,6 +1101,9 @@ if nav == "🏠 Overview & Recommendation":
                     <p style="font-size:13px; color:#475569; line-height:1.6; margin:0 0 10px 0;">
                         <strong>Target Recommendation:</strong> Scenario B (Quality-Gated L1) remains the optimal commercial strategy, delivering <strong>₹{live_scenarios['savings_b']/1e5:.2f} Lakhs in net savings vs Budget</strong> (₹{live_scenarios['spend_b']/1e7:.2f} Cr spend) for a compliance premium of <strong>+₹{live_scenarios['cost_of_compliance']:,.0f} (+{live_scenarios['compliance_pct']:.2f}% higher than Scenario A)</strong> while eliminating uncertified <strong>Vendor 4 (Sri Balaji Packaging)</strong>. However, final award approval is strictly locked until unresolved commercial inputs are resolved.
                     </p>
+                    <div style="background-color:#ffffff; border:1px solid #e2e8f0; border-radius:8px; padding:10px 14px; font-size:12px; color:#334155; margin-bottom:10px; line-height:1.5;">
+                        <strong>Scenario B vs Scenario C Strategic Trade-off:</strong> Scenario B awards 100% volume to the lowest qualified supplier per line for maximum commercial savings. <strong>Scenario C (Dual Sourcing 70/30)</strong> splits the 5 Criticality A lines (Lines 9, 10, 26, 27, 30) 70/30 between L1 and L2 qualified suppliers to eliminate single-source failure risk, requiring an incremental risk premium of <strong>+₹{live_scenarios['cost_diff_c_vs_b']:,.0f} (+{live_scenarios['pct_diff_c_vs_b']:.2f}% higher than Scenario B)</strong> (Total Spend: ₹{live_scenarios['spend_c']/1e7:.2f} Cr; +₹{live_scenarios['cost_diff_c_vs_a']:,.0f} / +{live_scenarios['pct_diff_c_vs_a']:.2f}% higher than Scenario A). Scenario B is maintained as the primary award recommendation, while Scenario C remains a buyer-selectable risk hedge.
+                    </div>
                     <div style="background-color:#ffffff; border:1px solid #fecaca; border-radius:8px; padding:10px 14px; font-size:12px; color:#1e293b;">
                         <strong>Blocking Lines ({gate_result['unresolved_line_count']}):</strong> Lines {gate_result['unresolved_lines']} — Vendor 5 quoted <em>'Same as last year'</em> on New SKUs with no historical baseline.
                         <br><span style="color:#64748b;">Note: Genuinely disqualified vendors (Vendor 4 across all lines; Vendor 5 on Line 27 for moisture barrier) are excluded from the gate count.</span>
@@ -1047,9 +1129,12 @@ if nav == "🏠 Overview & Recommendation":
                     <div style="font-size:13px; font-weight:700; color:#15803d; margin:6px 0 8px 0;">
                         {gate_result['guidance_message']}
                     </div>
-                    <p style="font-size:13px; color:#334155; line-height:1.6; margin:0;">
+                    <p style="font-size:13px; color:#334155; line-height:1.6; margin:0 0 10px 0;">
                         Live calculations confirm that <strong>Scenario B</strong> delivers <strong>₹{live_scenarios['savings_b']/1e5:.2f} Lakhs in net savings vs Budget</strong> (Spend: ₹{live_scenarios['spend_b']/1e7:.2f} Cr; +₹{live_scenarios['cost_of_compliance']:,.0f} / +{live_scenarios['compliance_pct']:.2f}% higher than Scenario A) with 100% compliance across all 30 packaging items.
                     </p>
+                    <div style="background-color:#ffffff; border:1px solid #bbf7d0; border-radius:8px; padding:10px 14px; font-size:12px; color:#14532d; line-height:1.5;">
+                        <strong>Scenario B vs Scenario C Strategic Trade-off:</strong> Scenario B is the recommended award allocating 100% volume to qualified L1 vendors. For business continuity, <strong>Scenario C (Dual Sourcing 70/30)</strong> offers supply insurance on 5 Criticality A lines (Lines 9, 10, 26, 27, 30) for an additional <strong>+₹{live_scenarios['cost_diff_c_vs_b']:,.0f} (+{live_scenarios['pct_diff_c_vs_b']:.2f}% higher than Scenario B)</strong> (Total Spend: ₹{live_scenarios['spend_c']/1e7:.2f} Cr; +₹{live_scenarios['cost_diff_c_vs_a']:,.0f} / +{live_scenarios['pct_diff_c_vs_a']:.2f}% higher than Scenario A).
+                    </div>
                 </div>
             </div>
         </div>
