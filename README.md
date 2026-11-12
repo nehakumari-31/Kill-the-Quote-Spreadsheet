@@ -15,7 +15,7 @@ An enterprise-grade **AI-Powered Procurement Co-pilot** designed for a category 
    - **Interactive Raw Quote Inspector**: Select any line item to inspect the exact raw quote text before normalization (e.g., `₹6,120 per 1,000 Nos`, `USD 0.0708 /Nos`, `₹38/kg + freight`).
 3. **Award Scenarios & Spend Analytics:**
    - Plotly bar chart comparing total spend across Master Budget (₹4.00 Cr), Scenario A: Unconstrained L1 (₹3.77 Cr), Scenario B: Quality-Gated L1 (₹3.80 Cr), and Scenario C: Dual Sourced (₹3.81 Cr).
-   - **Cost of Compliance** card showing the +₹2,74,585 (+0.73%) premium to eliminate quality risk.
+   - **Cost of Compliance** card showing the +₹468,592 (+1.25% higher than Scenario A) premium to eliminate quality risk.
 4. **Centralized Award Approval Gate & Vendor Eligibility:**
    - Single source of truth gate (`evaluate_award_approval_gate`) integrated across Overview, Award Screen, and AI Analyst.
    - Dynamically counts unresolved lines from eligible bidders (Lines 25, 28, 29, 30 for Vendor 5 on New SKUs with no PO history).

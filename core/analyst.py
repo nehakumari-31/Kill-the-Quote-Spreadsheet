@@ -73,9 +73,9 @@ DATA-DRIVEN VENDOR QUALIFICATIONS:
 LIVE SCENARIO SPENDS (PANDAS CALCULATED):
 - Master Budget: ₹{scenarios['budget_spend']:,.0f}
 - Scenario A (Unconstrained L1): ₹{scenarios['spend_a']:,.0f} (Net Savings: ₹{scenarios['savings_a']:,.0f} / {scenarios['savings_pct_a']:.2f}%)
-- Scenario B (Quality-Gated L1): ₹{scenarios['spend_b']:,.0f} (Net Savings: ₹{scenarios['savings_b']:,.0f} / {scenarios['savings_pct_b']:.2f}%)
-- Scenario C (Dual Sourcing 70/30): ₹{scenarios['spend_c']:,.0f} (Net Savings: ₹{scenarios['savings_c']:,.0f} / {scenarios['savings_pct_c']:.2f}%)
-- Cost of Compliance (B vs A): +₹{scenarios['cost_of_compliance']:,.0f} (+{scenarios['compliance_pct']:.2f}%)
+- Scenario B (Quality-Gated L1): ₹{scenarios['spend_b']:,.0f} (Net Savings: ₹{scenarios['savings_b']:,.0f} / {scenarios['savings_pct_b']:.2f}%; +{scenarios.get('pct_diff_b_vs_a', ((scenarios['spend_b']-scenarios['spend_a'])/scenarios['spend_a'])*100):.2f}% higher than Scenario A)
+- Scenario C (Dual Sourcing 70/30): ₹{scenarios['spend_c']:,.0f} (Net Savings: ₹{scenarios['savings_c']:,.0f} / {scenarios['savings_pct_c']:.2f}%; +{scenarios.get('pct_diff_c_vs_a', ((scenarios['spend_c']-scenarios['spend_a'])/scenarios['spend_a'])*100):.2f}% higher than Scenario A)
+- Cost of Compliance (B vs A): +₹{scenarios['cost_of_compliance']:,.0f} (+{scenarios['compliance_pct']:.2f}% higher than Scenario A)
 - Uncovered Lines in Scenario B: {scenarios.get('uncovered_lines_b', [])}
 - Scenario B Operational & Quality Risks: {scenarios.get('risks_b', [])}
 
@@ -91,7 +91,7 @@ ACTIVE BUYER OVERRIDES:
 6. When answering award recommendations ("Which vendor should we award to, and why?"):
    - Recommend Award on Scenario B (Quality-Gated L1).
    - Explicitly cite the current Approval Gate status: '{gate_result['status_label']}'. If blocked, state clearly: '{gate_result['guidance_message']}' and identify pending lines: {gate_result['unresolved_lines']}.
-   - Compare Scenario B with the lowest-cost unconstrained Scenario A (saves ₹{scenarios['savings_a']:,.0f} vs ₹{scenarios['savings_b']:,.0f}), explaining the cost of compliance premium (+₹{scenarios['cost_of_compliance']:,.0f} / +{scenarios['compliance_pct']:.2f}%) required to eliminate disqualified Vendor 4.
+   - Compare Scenario B with the lowest-cost unconstrained Scenario A (saves ₹{scenarios['savings_a']:,.0f} vs ₹{scenarios['savings_b']:,.0f}), explaining the cost of compliance premium (+₹{scenarios['cost_of_compliance']:,.0f} / +{scenarios['compliance_pct']:.2f}% higher than Scenario A) required to eliminate disqualified Vendor 4.
 7. When answering commercial and compliance risks ("What are the key commercial and compliance risks?"):
    - Identify unresolved quotations requiring buyer intervention (Vendor 5 on Lines {gate_result['unresolved_lines']} quoted 'Same as last year' on New SKUs with no historical baseline). Clarify that Line 27 is excluded from the gate because Vendor 5 failed Gate Q7 for moisture barrier.
    - Detail Vendor 4's failed gates (expired ISO 9001, capacity 280 TPM < 300 TPM, no test lab, 2.4% rejection rate).
@@ -99,7 +99,7 @@ ACTIVE BUYER OVERRIDES:
    - Note FX exposure for Vendor 3 (quoted in USD at ₹{fx_rate:.2f}/USD).
    - Note conditional discount policy: Vendor 1's 5% all-lines discount cannot apply because the award is split.
 8. When answering Scenario B vs Scenario C ("Why is Scenario B recommended over Scenario C?"):
-   - Detail the cost difference: Scenario C spends ₹{scenarios['spend_c']:,.0f} vs Scenario B's ₹{scenarios['spend_b']:,.0f} (+₹{scenarios['spend_c'] - scenarios['spend_b']:,.0f} premium, reducing net savings by that amount).
+   - Detail the cost difference: Scenario C spends ₹{scenarios['spend_c']:,.0f} vs Scenario B's ₹{scenarios['spend_b']:,.0f} (+₹{scenarios['spend_c'] - scenarios['spend_b']:,.0f} / +{((scenarios['spend_c'] - scenarios['spend_b'])/scenarios['spend_b'])*100:.2f}% higher than Scenario B; +₹{scenarios['spend_c'] - scenarios['spend_a']:,.0f} / +{((scenarios['spend_c'] - scenarios['spend_a'])/scenarios['spend_a'])*100:.2f}% higher than Scenario A).
    - Explain the dual-sourcing trade-off: Scenario C splits 70/30 on 5 Criticality A lines (Lines 9, 10, 26, 27, 30) for supply continuity insurance against single-plant disruption. Scenario B is recommended as the commercial baseline to maximize savings within the local Chakan manufacturing hub where Apex has 800 TPM capacity.
 """
 
@@ -256,7 +256,7 @@ def _deterministic_analyst_answer(
             f"- **Master Budget Ceiling:** ₹{budget:,.0f}",
             f"- **Scenario B Total Spend:** **₹{spend_b:,.0f}**",
             f"- **Net Projected Savings:** **₹{sav_b:,.0f} ({sav_pct_b:.2f}%)** vs budget",
-            f"- **Cost of Compliance (B vs Lowest-Cost A):** **+₹{cost:,.0f} (+{cost_pct:.2f}%)**\n",
+            f"- **Cost of Compliance (B vs Lowest-Cost A):** **+₹{cost:,.0f} (+{cost_pct:.2f}% higher than Scenario A)**\n",
             gate_status_block,
             "\n#### 1. Comparison: Lowest-Cost Option (Scenario A) vs. Quality-Gated (Scenario B)",
             f"- **Lowest-Cost Option (Scenario A - Unconstrained L1):** Totals **₹{spend_a:,.0f}**, yielding ₹{scenarios['savings_a']:,.0f} ({scenarios['savings_pct_a']:.2f}%) savings.",
@@ -265,7 +265,7 @@ def _deterministic_analyst_answer(
             "  * **Q2 (Monthly Capacity):** 280 TPM (fails minimum 300 TPM threshold).",
             "  * **Q3 (Testing Lab):** Lacks certified in-house burst/ECT test laboratory.",
             "  * **Q4 (Defect Rate):** Rejection rate of 2.4% (exceeds 1.5% maximum allowable ceiling).",
-            f"- **Compliance Premium Justification:** Paying the compliance premium of **+₹{cost:,.0f} (+{cost_pct:.2f}%)** is essential to prevent factory downtime, carton transit collapse, and quality warranty claims.\n",
+            f"- **Compliance Premium Justification:** Paying the compliance premium of **+₹{cost:,.0f} (+{cost_pct:.2f}% higher than Scenario A)** is essential to prevent factory downtime, carton transit collapse, and quality warranty claims.\n",
             "#### 2. Supplier Award Allocation Breakdown (Scenario B)",
             *(alloc_lines if alloc_lines else ["- Apex Packaging (V1) is awarded lowest compliant lines (~86% share)."]),
             "\n*All metrics are calculated dynamically from live normalized quotations and audit records.*"
@@ -319,6 +319,7 @@ def _deterministic_analyst_answer(
         or (matches_context(["scenario b", "scenario c", "dual-sourcing"]) and any(w in q_low for w in ["why", "elaborate", "tell me more", "how so"]))
     )
     if is_q3:
+        spend_a = scenarios["spend_a"]
         spend_b = scenarios["spend_b"]
         spend_c = scenarios["spend_c"]
         budget = scenarios["budget_spend"]
@@ -343,13 +344,13 @@ def _deterministic_analyst_answer(
             f"**Scenario B (Quality-Gated L1)** is recommended as the commercial baseline over **Scenario C (Dual Sourcing 70/30)** because it maximizes cost savings by an additional **₹{cost_diff:,.0f}** while fully satisfying all quality and compliance gates.\n",
             "#### 2. Financial Metrics Comparison",
             f"- **Master Budget Ceiling:** ₹{budget:,.0f}",
-            f"- **Scenario B (Quality-Gated L1):** **₹{spend_b:,.0f}** | Saves: **₹{sav_b:,.0f} ({sav_pct_b:.2f}%)**",
-            f"- **Scenario C (Dual Sourcing 70/30):** **₹{spend_c:,.0f}** | Saves: **₹{sav_c:,.0f} ({sav_pct_c:.2f}%)**",
-            f"- **Direct Cost Difference (C vs B):** **+₹{cost_diff:,.0f} (+{pct_diff:.2f}%)**\n",
+            f"- **Scenario B (Quality-Gated L1):** **₹{spend_b:,.0f}** | Saves: **₹{sav_b:,.0f} ({sav_pct_b:.2f}%)** vs budget (+{scenarios.get('pct_diff_b_vs_a', ((spend_b-spend_a)/spend_a)*100):.2f}% higher than Scenario A)",
+            f"- **Scenario C (Dual Sourcing 70/30):** **₹{spend_c:,.0f}** | Saves: **₹{sav_c:,.0f} ({sav_pct_c:.2f}%)** vs budget (+{scenarios.get('pct_diff_c_vs_a', ((spend_c-spend_a)/spend_a)*100):.2f}% higher than Scenario A)",
+            f"- **Direct Cost Difference (C vs B):** **+₹{cost_diff:,.0f} (+{pct_diff:.2f}% higher than Scenario B)**\n",
             "#### 3. Strategic Trade-Off: Resilience vs. Cost Optimization",
             "- **The Purpose of Scenario C (Risk Insurance):**",
             "  * Scenario C mandates a **70% L1 / 30% L2 split** on all **5 Criticality A packaging lines** (Lines 9, 10, 26, 27, 30: refrigerator and washing machine main cartons).",
-            f"  * Paying the +₹{cost_diff:,.0f} (+{pct_diff:.2f}%) premium provides **supply chain redundancy**: if the primary supplier suffers machinery breakdown, paper shortage, or fire, the secondary supplier already has active tooling, approved dies, and active purchase orders.",
+            f"  * Paying the +₹{cost_diff:,.0f} (+{pct_diff:.2f}% higher than Scenario B) premium provides **supply chain redundancy**: if the primary supplier suffers machinery breakdown, paper shortage, or fire, the secondary supplier already has active tooling, approved dies, and active purchase orders.",
             "- **Why Scenario B is Recommended as the Baseline:**",
             "  * Apex Packaging (V1) is located within the Chakan industrial cluster with substantial capacity (800 TPM) and a proven 48-hour emergency lead time.",
             f"  * For standard corrugated packaging, single-sourcing with contractual delivery penalties and safety stock buffers is commercially standard, allowing Veda to retain the full ₹{sav_b:,.0f} ({sav_pct_b:.2f}%) in net savings.",
@@ -465,9 +466,9 @@ def _deterministic_analyst_answer(
             "### Live Award Scenarios & Cost of Compliance Breakdown\n",
             f"- **Master Budget Spend:** **₹{budget:,.0f}**",
             f"- **Scenario A (Unconstrained L1):** **₹{spend_a:,.0f}** (Saves ₹{scenarios['savings_a']:,.0f} / {scenarios['savings_pct_a']:.2f}%)",
-            f"- **Scenario B (Quality-Gated L1):** **₹{spend_b:,.0f}** (Saves ₹{sav_b:,.0f} / {sav_pct_b:.2f}%)",
-            f"- **Scenario C (Dual Sourcing 70/30):** **₹{spend_c:,.0f}** (Saves ₹{scenarios['savings_c']:,.0f} / {scenarios['savings_pct_c']:.2f}%)",
-            f"- **Cost of Compliance (B vs A):** **+₹{cost:,.0f} (+{pct:.2f}%)**",
+            f"- **Scenario B (Quality-Gated L1):** **₹{spend_b:,.0f}** (Saves ₹{sav_b:,.0f} / {sav_pct_b:.2f}%; +{scenarios.get('pct_diff_b_vs_a', ((spend_b-spend_a)/spend_a)*100):.2f}% higher than Scenario A)",
+            f"- **Scenario C (Dual Sourcing 70/30):** **₹{spend_c:,.0f}** (Saves ₹{scenarios['savings_c']:,.0f} / {scenarios['savings_pct_c']:.2f}%; +{scenarios.get('pct_diff_c_vs_a', ((spend_c-spend_a)/spend_a)*100):.2f}% higher than Scenario A)",
+            f"- **Cost of Compliance (B vs A):** **+₹{cost:,.0f} (+{pct:.2f}% higher than Scenario A)**",
             f"- **Uncovered Lines in Scenario B:** {uncovered if uncovered else 'None (100% Mandatory Coverage Achieved)'}\n",
             f"**Strategic Fact:** The compliance premium of ₹{cost:,.0f} is required to enforce mandatory RFx quality gates "
             "(excluding uncertified Vendor 4 due to expired ISO 9001 and inadequate 280 TPM capacity). All figures are computed dynamically."
@@ -514,7 +515,7 @@ def _deterministic_analyst_answer(
         f"- **Master Budget Ceiling:** ₹{scenarios['budget_spend']:,.0f}\n"
         f"- **Recommended Scenario B Spend:** ₹{scenarios['spend_b']:,.0f} (Net Savings: ₹{scenarios['savings_b']:,.0f} / {scenarios['savings_pct_b']:.2f}%)\n"
         f"- **Scenario C Spend (Dual-Sourced):** ₹{scenarios['spend_c']:,.0f}\n"
-        f"- **Cost of Compliance Premium:** +₹{scenarios['cost_of_compliance']:,.0f} (+{scenarios['compliance_pct']:.2f}%)\n"
+        f"- **Cost of Compliance Premium:** +₹{scenarios['cost_of_compliance']:,.0f} (+{scenarios['compliance_pct']:.2f}% higher than Scenario A)\n"
         f"{gate_summary}\n"
         f"- **Uncovered Mandatory Lines:** {len(scenarios.get('uncovered_lines_b', []))} lines\n"
         f"- **Active Buyer Overrides:** {len(overrides) if overrides else 0} overridden cells\n\n"

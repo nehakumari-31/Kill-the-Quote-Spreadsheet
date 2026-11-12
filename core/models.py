@@ -142,6 +142,9 @@ class NormalizationResult:
     applied_discount: Optional[float] = None
     discount_condition: Optional[str] = None
     unresolved_reason: Optional[str] = None
+    converted_inr_price: Optional[float] = None
+    converted_inr_uom: Optional[str] = None
+    normalized_uom: Optional[str] = None
 
     def __iter__(self):
         """Allows unpacking as (normalized_price, trust_flag, formula_citation, status)."""

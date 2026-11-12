@@ -499,7 +499,12 @@ def initialize_database():
             "V2 Status": res_v2.status,
             "V2 Unresolved Reason": res_v2.unresolved_reason,
             "V3 Raw Value": res_v3.original_value,
+            "V3 Raw Currency": res_v3.original_currency,
             "V3 Raw UOM": res_v3.original_uom,
+            "V3 FX Rate": res_v3.exchange_rate,
+            "V3 Converted INR Price": res_v3.converted_inr_price,
+            "V3 Converted INR UOM": res_v3.converted_inr_uom,
+            "V3 Normalized UOM": res_v3.normalized_uom,
             "V3 Status": res_v3.status,
             "V3 Unresolved Reason": res_v3.unresolved_reason,
             "V4 Raw Value": res_v4.original_value,
@@ -664,6 +669,18 @@ def integrate_quotation_into_df_norm(meta: QuotationMetadata, target_vendor: Opt
             st.session_state.df_norm.loc[row_idx, cite_col] = cite
         if vendor_col == "V5 (Standard Box)":
             st.session_state.df_norm.loc[row_idx, "V5 Trust Flag"] = flag
+
+        v_code = vendor_col.split()[0]
+        st.session_state.df_norm.loc[row_idx, f"{v_code} Raw Value"] = f.price
+        st.session_state.df_norm.loc[row_idx, f"{v_code} Raw UOM"] = f.unit
+        st.session_state.df_norm.loc[row_idx, f"{v_code} Status"] = "Verified" if pd.notna(landed) else ("Unresolved" if flag == "UNRESOLVED" else "Missing")
+        if v_code == "V3":
+            st.session_state.df_norm.loc[row_idx, "V3 Raw Currency"] = f.currency or meta.currency
+            st.session_state.df_norm.loc[row_idx, "V3 FX Rate"] = FX_RATE
+            if 'norm_res' in locals() and norm_res:
+                st.session_state.df_norm.loc[row_idx, "V3 Converted INR Price"] = norm_res.converted_inr_price
+                st.session_state.df_norm.loc[row_idx, "V3 Converted INR UOM"] = norm_res.converted_inr_uom
+                st.session_state.df_norm.loc[row_idx, "V3 Normalized UOM"] = norm_res.normalized_uom
         count += 1
 
     return count
@@ -884,17 +901,17 @@ if nav == "🏠 Overview & Recommendation":
             <div class="stat-label" style="color:#15803d;">Scenario B (Quality-Gated L1) ★</div>
             <div class="stat-number" style="color:#15803d;">₹{live_scenarios['spend_b']/1e7:.2f} Cr</div>
             <div style="font-size:11px; color:#15803d; font-weight:700; margin-top:4px;">
-                Saves ₹{live_scenarios['savings_b']/1e5:.2f} L ({(live_scenarios['savings_b']/live_scenarios['budget_spend'])*100:.2f}%)
+                Saves ₹{live_scenarios['savings_b']/1e5:.2f} L ({(live_scenarios['savings_b']/live_scenarios['budget_spend'])*100:.2f}%) vs Budget · +{live_scenarios.get('pct_diff_b_vs_a', ((live_scenarios['spend_b']-live_scenarios['spend_a'])/live_scenarios['spend_a'])*100):.2f}% higher than Scenario A
             </div>
         </div>
         """, unsafe_allow_html=True)
     with k3:
         st.markdown(f"""
         <div class="procure-card" style="padding:16px;">
-            <div class="stat-label">Cost of Compliance</div>
+            <div class="stat-label">Cost of Compliance (B vs A)</div>
             <div class="stat-number" style="color:#b45309;">+₹{live_scenarios['cost_of_compliance']:,.0f}</div>
             <div style="font-size:11px; color:#b45309; font-weight:600; margin-top:4px;">
-                +{live_scenarios['compliance_pct']:.2f}% to eliminate quality risk
+                +{live_scenarios['compliance_pct']:.2f}% higher than Scenario A
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -931,7 +948,7 @@ if nav == "🏠 Overview & Recommendation":
                         {gate_result['guidance_message']}
                     </div>
                     <p style="font-size:13px; color:#475569; line-height:1.6; margin:0 0 10px 0;">
-                        <strong>Target Recommendation:</strong> Scenario B (Quality-Gated L1) remains the optimal commercial strategy, delivering <strong>₹{live_scenarios['savings_b']/1e5:.2f} Lakhs in net savings</strong> (₹{live_scenarios['spend_b']/1e7:.2f} Cr spend) while eliminating uncertified <strong>Vendor 4 (Sri Balaji Packaging)</strong>. However, final award approval is strictly locked until unresolved commercial inputs are resolved.
+                        <strong>Target Recommendation:</strong> Scenario B (Quality-Gated L1) remains the optimal commercial strategy, delivering <strong>₹{live_scenarios['savings_b']/1e5:.2f} Lakhs in net savings vs Budget</strong> (₹{live_scenarios['spend_b']/1e7:.2f} Cr spend) for a compliance premium of <strong>+₹{live_scenarios['cost_of_compliance']:,.0f} (+{live_scenarios['compliance_pct']:.2f}% higher than Scenario A)</strong> while eliminating uncertified <strong>Vendor 4 (Sri Balaji Packaging)</strong>. However, final award approval is strictly locked until unresolved commercial inputs are resolved.
                     </p>
                     <div style="background-color:#ffffff; border:1px solid #fecaca; border-radius:8px; padding:10px 14px; font-size:12px; color:#1e293b;">
                         <strong>Blocking Lines ({gate_result['unresolved_line_count']}):</strong> Lines {gate_result['unresolved_lines']} — Vendor 5 quoted <em>'Same as last year'</em> on New SKUs with no historical baseline.
@@ -959,7 +976,7 @@ if nav == "🏠 Overview & Recommendation":
                         {gate_result['guidance_message']}
                     </div>
                     <p style="font-size:13px; color:#334155; line-height:1.6; margin:0;">
-                        Live calculations confirm that <strong>Scenario B</strong> delivers <strong>₹{live_scenarios['savings_b']/1e5:.2f} Lakhs in net savings</strong> (Spend: ₹{live_scenarios['spend_b']/1e7:.2f} Cr) with 100% compliance across all 30 packaging items.
+                        Live calculations confirm that <strong>Scenario B</strong> delivers <strong>₹{live_scenarios['savings_b']/1e5:.2f} Lakhs in net savings vs Budget</strong> (Spend: ₹{live_scenarios['spend_b']/1e7:.2f} Cr; +₹{live_scenarios['cost_of_compliance']:,.0f} / +{live_scenarios['compliance_pct']:.2f}% higher than Scenario A) with 100% compliance across all 30 packaging items.
                     </p>
                 </div>
             </div>
@@ -1146,6 +1163,44 @@ elif nav == "📊 Quote Comparison Matrix & Editor":
             safe_status = html.escape(str(v_status))
             safe_cite = html.escape(str(raw_cite))
 
+            # Specific 5-field breakdown for V3 (Global USD)
+            v3_details_html = ""
+            if vcode == "V3":
+                v3_norm_p = line_row.get("V3 (Global USD)")
+                v3_curr = line_row.get("V3 Raw Currency", "USD")
+                v3_fx = line_row.get("V3 FX Rate", FX_RATE)
+
+                try:
+                    num_raw = float(str(raw_val).replace("$", "").replace(",", "").strip())
+                    is_num = True
+                except (ValueError, TypeError):
+                    is_num = False
+
+                if is_num:
+                    conv_p = float(line_row.get("V3 Converted INR Price") if pd.notna(line_row.get("V3 Converted INR Price")) else (num_raw * float(v3_fx)))
+                    conv_uom = str(line_row.get("V3 Converted INR UOM") if pd.notna(line_row.get("V3 Converted INR UOM")) else raw_uom)
+                    norm_uom = str(line_row.get("V3 Normalized UOM") if pd.notna(line_row.get("V3 Normalized UOM")) else "Nos")
+                    norm_str = f"₹{float(v3_norm_p):.2f} / {html.escape(norm_uom)}" if pd.notna(v3_norm_p) else "Excluded / Unresolved"
+                    v3_details_html = f"""
+                    <div style="font-size:11px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:6px 8px; margin:6px 0; line-height:1.4;">
+                        <div><strong>1. Orig. Quoted Price:</strong> ${num_raw:.4f} {html.escape(str(v3_curr))}</div>
+                        <div><strong>2. Orig. Quoted UOM:</strong> {safe_uom}</div>
+                        <div><strong>3. Applied FX Rate:</strong> ₹{float(v3_fx):.2f}/{html.escape(str(v3_curr))}</div>
+                        <div><strong>4. Converted Price:</strong> ₹{conv_p:.2f} / {html.escape(conv_uom)}</div>
+                        <div><strong>5. Normalized Price:</strong> {norm_str}</div>
+                    </div>
+                    """
+                else:
+                    v3_details_html = f"""
+                    <div style="font-size:11px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:6px 8px; margin:6px 0; line-height:1.4;">
+                        <div><strong>1. Orig. Quoted Price:</strong> {safe_val} ({html.escape(str(v3_curr))})</div>
+                        <div><strong>2. Orig. Quoted UOM:</strong> {safe_uom}</div>
+                        <div><strong>3. Applied FX Rate:</strong> ₹{float(v3_fx):.2f}/{html.escape(str(v3_curr))}</div>
+                        <div><strong>4. Converted Price:</strong> N/A (Not Quoted)</div>
+                        <div><strong>5. Normalized Price:</strong> Excluded from Award</div>
+                    </div>
+                    """
+
             # Only render reason block when a valid, non-empty, non-NaN reason exists
             is_valid_reason = (
                 pd.notna(unres_msg)
@@ -1179,6 +1234,7 @@ elif nav == "📊 Quote Comparison Matrix & Editor":
             <div class="procure-card" style="padding:14px;">
                 <div style="font-weight:700; color:#0f172a; font-size:13px;">{safe_vtitle}</div>
                 <div style="font-size:11px; color:#64748b; margin-top:2px;">Raw: <code>{safe_val} ({safe_uom})</code></div>
+                {v3_details_html}
                 <div style="margin-top:6px;">
                     <span class="{badge_class}">Status: {badge_label}</span>
                 </div>
@@ -1257,7 +1313,7 @@ elif nav == "🎯 Live Award Scenarios Engine":
             <div class="stat-label" style="color:#2563eb;">Scenario A: Unconstrained L1</div>
             <div class="stat-number">₹{live_scenarios['spend_a']/1e7:.2f} Cr</div>
             <div style="font-size:12px; font-weight:600; color:#15803d; margin-top:2px;">
-                Saves ₹{live_scenarios['savings_a']/1e5:.2f} L ({(live_scenarios['savings_a']/live_scenarios['budget_spend'])*100:.2f}%)
+                Saves ₹{live_scenarios['savings_a']/1e5:.2f} L ({(live_scenarios['savings_a']/live_scenarios['budget_spend'])*100:.2f}%) vs Budget · Baseline
             </div>
             <div style="margin-top:6px; font-size:11px; color:#b91c1c;">⚠ Awards lines to uncertified V4</div>
         </div>
@@ -1268,7 +1324,10 @@ elif nav == "🎯 Live Award Scenarios Engine":
             <div class="stat-label" style="color:#16a34a;">Scenario B: Quality-Gated L1 ★</div>
             <div class="stat-number">₹{live_scenarios['spend_b']/1e7:.2f} Cr</div>
             <div style="font-size:12px; font-weight:600; color:#15803d; margin-top:2px;">
-                Saves ₹{live_scenarios['savings_b']/1e5:.2f} L ({(live_scenarios['savings_b']/live_scenarios['budget_spend'])*100:.2f}%)
+                Saves ₹{live_scenarios['savings_b']/1e5:.2f} L ({(live_scenarios['savings_b']/live_scenarios['budget_spend'])*100:.2f}%) vs Budget
+            </div>
+            <div style="font-size:11px; font-weight:700; color:#15803d; margin-top:2px;">
+                +₹{live_scenarios['cost_diff_b_vs_a']:,.0f} (+{live_scenarios['pct_diff_b_vs_a']:.2f}% higher than Scenario A)
             </div>
             <div style="margin-top:6px; font-size:11px; color:#15803d;">✓ Eliminates quality risk</div>
         </div>
@@ -1279,7 +1338,10 @@ elif nav == "🎯 Live Award Scenarios Engine":
             <div class="stat-label" style="color:#7e22ce;">Scenario C: Dual Sourcing (70/30)</div>
             <div class="stat-number">₹{live_scenarios['spend_c']/1e7:.2f} Cr</div>
             <div style="font-size:12px; font-weight:600; color:#15803d; margin-top:2px;">
-                Saves ₹{live_scenarios['savings_c']/1e5:.2f} L ({(live_scenarios['savings_c']/live_scenarios['budget_spend'])*100:.2f}%)
+                Saves ₹{live_scenarios['savings_c']/1e5:.2f} L ({(live_scenarios['savings_c']/live_scenarios['budget_spend'])*100:.2f}%) vs Budget
+            </div>
+            <div style="font-size:11px; font-weight:700; color:#7e22ce; margin-top:2px;">
+                +₹{live_scenarios['cost_diff_c_vs_a']:,.0f} (+{live_scenarios['pct_diff_c_vs_a']:.2f}% higher than Scenario A)
             </div>
             <div style="margin-top:6px; font-size:11px; color:#7e22ce;">✓ Insures 5 Critical SKUs</div>
         </div>
@@ -1327,10 +1389,10 @@ elif nav == "🎯 Live Award Scenarios Engine":
                 ⚖️
             </div>
             <div>
-                <h4 style="font-size:15px; font-weight:800; color:#92400e; margin:0 0 4px 0;">Live Cost of Compliance: +₹{live_scenarios['cost_of_compliance']:,.0f} (+{live_scenarios['compliance_pct']:.2f}%)</h4>
+                <h4 style="font-size:15px; font-weight:800; color:#92400e; margin:0 0 4px 0;">Live Cost of Compliance: +₹{live_scenarios['cost_of_compliance']:,.0f} (+{live_scenarios['compliance_pct']:.2f}% higher than Scenario A)</h4>
                 <p style="font-size:13px; color:#78350f; line-height:1.5; margin:0;">
-                    Dynamic calculation: Enforcing the quality gate to exclude uncertified Vendor 4 costs an extra <strong>₹{live_scenarios['cost_of_compliance']:,.0f}</strong>. 
-                    This guarantees that all awarded lines comply with ISO 9001 and in-house board lab testing standards.
+                    Dynamic calculation: Enforcing the quality gate (Scenario B vs Scenario A) requires an additional investment of <strong>+₹{live_scenarios['cost_of_compliance']:,.0f} (+{live_scenarios['compliance_pct']:.2f}% higher than Scenario A)</strong>. 
+                    This rational premium eliminates uncertified Vendor 4 and guarantees that all awarded lines comply with ISO 9001 and in-house board lab testing standards.
                 </p>
             </div>
         </div>

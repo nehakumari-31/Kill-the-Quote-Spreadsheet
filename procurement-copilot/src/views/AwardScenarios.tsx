@@ -28,19 +28,19 @@ const chartData = [
   },
   {
     name: "Scenario A: Unconstrained L1",
-    spend: 37744605,
+    spend: 37447255,
     fill: SCENARIO_COLORS.scenarioA,
     shortName: "Scenario A",
   },
   {
     name: "Scenario B: Quality-Gated L1",
-    spend: 38019190,
+    spend: 37915847,
     fill: SCENARIO_COLORS.scenarioB,
     shortName: "Scenario B",
   },
   {
     name: "Scenario C: Quality + Dual Sourcing",
-    spend: 38118864,
+    spend: 38034120,
     fill: SCENARIO_COLORS.scenarioC,
     shortName: "Scenario C",
   },
@@ -238,8 +238,8 @@ export default function AwardScenarios() {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-1">
               <div className="bg-white border border-slate-200 rounded-lg p-3.5 shadow-sm">
                 <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Quality Gate Premium</p>
-                <p className="text-xl font-bold font-mono text-slate-800 mt-1">+₹2,74,585</p>
-                <p className="text-xs text-amber-700 mt-0.5 font-medium">+0.73% vs Scenario A</p>
+                <p className="text-xl font-bold font-mono text-slate-800 mt-1">+₹4,68,592</p>
+                <p className="text-xs text-amber-700 mt-0.5 font-medium">+1.25% higher than Scenario A</p>
                 <p className="text-[11px] text-slate-500 mt-2">
                   Premium to eliminate uncertified Vendor 4 across all lines.
                 </p>
@@ -247,17 +247,17 @@ export default function AwardScenarios() {
 
               <div className="bg-white border border-slate-200 rounded-lg p-3.5 shadow-sm">
                 <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Dual Sourcing Insurance</p>
-                <p className="text-xl font-bold font-mono text-slate-800 mt-1">+₹99,674</p>
-                <p className="text-xs text-purple-700 mt-0.5 font-medium">+0.26% vs Scenario B</p>
+                <p className="text-xl font-bold font-mono text-slate-800 mt-1">+₹1,18,273</p>
+                <p className="text-xs text-purple-700 mt-0.5 font-medium">+0.31% higher than Scenario B</p>
                 <p className="text-[11px] text-slate-500 mt-2">
-                  Additional cost to split 5 Critical SKUs 70/30 across two vendors.
+                  Additional cost to split 5 Critical SKUs 70/30 across two vendors (+₹5,86,865 / +1.57% higher than Scenario A).
                 </p>
               </div>
 
               <div className="bg-white border border-green-200 rounded-lg p-3.5 shadow-sm bg-green-50/30">
                 <p className="text-xs font-semibold text-green-700 uppercase tracking-wider">Executive Decision</p>
                 <p className="text-base font-bold text-slate-800 mt-1">Award on Scenario B</p>
-                <p className="text-xs text-green-700 mt-0.5 font-medium">Saves ₹19.85 Lakhs</p>
+                <p className="text-xs text-green-700 mt-0.5 font-medium">Saves ₹20.88 Lakhs vs Budget</p>
                 <p className="text-[11px] text-slate-600 mt-2">
                   Balances maximum achievable savings with 100% compliant suppliers.
                 </p>

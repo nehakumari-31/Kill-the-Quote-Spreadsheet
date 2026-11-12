@@ -457,7 +457,7 @@ export const QGATE_ROWS: QGateRow[] = [
 // ---- Award Scenarios Engine -----------------------------------
 export const AWARD_SCENARIOS = {
   budget: { label: "Master Budget", totalSpend: 40003750, savings: 0, compliance: null },
-  scenarioA: { label: "Unconstrained L1", totalSpend: 37744605, savings: 2259145, savingsPct: 5.65, compliance: "Baseline", eligibleVendors: "V1, V2, V3, V4, V5", takeaway: "High commercial risk: awards to uncertified V4" },
-  scenarioB: { label: "Quality-Gated L1", totalSpend: 38019190, savings: 1984560, savingsPct: 4.96, compliance: "+₹2,74,585 (+0.73%)", eligibleVendors: "V1, V2, V3 (cond.), V5 (cond.)", takeaway: "Eliminates all quality risk for an extra ₹2.75 Lakhs" },
-  scenarioC: { label: "Quality-Gated + Dual Sourcing", totalSpend: 38118864, savings: 1884886, savingsPct: 4.71, compliance: "+₹3,74,259 (+0.99%)", eligibleVendors: "V1, V2, V3 (cond.), V5 (cond.)", takeaway: "Insures 5 Critical SKUs against single points of failure" },
+  scenarioA: { label: "Unconstrained L1", totalSpend: 37447255, savings: 2556495, savingsPct: 6.39, compliance: "Baseline", eligibleVendors: "V1, V2, V3, V4, V5", takeaway: "High commercial risk: awards to uncertified V4" },
+  scenarioB: { label: "Quality-Gated L1", totalSpend: 37915847, savings: 2087903, savingsPct: 5.22, compliance: "+₹4,68,592 (+1.25% higher than Scenario A)", eligibleVendors: "V1, V2, V3 (cond.), V5 (cond.)", takeaway: "Eliminates all quality risk for a compliance premium of +₹4.69 Lakhs (+1.25% higher than Scenario A)" },
+  scenarioC: { label: "Quality-Gated + Dual Sourcing", totalSpend: 38034120, savings: 1969630, savingsPct: 4.92, compliance: "+₹5,86,865 (+1.57% higher than Scenario A)", eligibleVendors: "V1, V2, V3 (cond.), V5 (cond.)", takeaway: "Insures 5 Critical SKUs against single points of failure (+₹1,18,273 higher than Scenario B)" },
 };

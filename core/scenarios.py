@@ -574,6 +574,15 @@ def calculate_award_scenarios(
     cost_of_compliance = spend_b - spend_a
     compliance_pct = (cost_of_compliance / spend_a) * 100.0 if spend_a > 0 else 0.0
 
+    cost_diff_b_vs_a = spend_b - spend_a
+    pct_diff_b_vs_a = (cost_diff_b_vs_a / spend_a) * 100.0 if spend_a > 0 else 0.0
+
+    cost_diff_c_vs_a = spend_c - spend_a
+    pct_diff_c_vs_a = (cost_diff_c_vs_a / spend_a) * 100.0 if spend_a > 0 else 0.0
+
+    cost_diff_c_vs_b = spend_c - spend_b
+    pct_diff_c_vs_b = (cost_diff_c_vs_b / spend_b) * 100.0 if spend_b > 0 else 0.0
+
     # Vendor spend shares for Scenario A
     vendor_shares_a = {}
     for v, s in a_vendor_spends.items():
@@ -614,6 +623,12 @@ def calculate_award_scenarios(
         "savings_pct_c": savings_pct_c,
         "cost_of_compliance": cost_of_compliance,
         "compliance_pct": compliance_pct,
+        "cost_diff_b_vs_a": cost_diff_b_vs_a,
+        "pct_diff_b_vs_a": pct_diff_b_vs_a,
+        "cost_diff_c_vs_a": cost_diff_c_vs_a,
+        "pct_diff_c_vs_a": pct_diff_c_vs_a,
+        "cost_diff_c_vs_b": cost_diff_c_vs_b,
+        "pct_diff_c_vs_b": pct_diff_c_vs_b,
         "uncovered_lines_b": uncovered_lines_b,
         "uncovered_lines_c": uncovered_lines_c,
         "a_line_allocations": a_line_allocations,

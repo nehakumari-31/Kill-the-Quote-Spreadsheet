@@ -95,11 +95,11 @@ export default function Overview() {
                 Zero Compliance Risk
               </span>
               <span className="text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded-full">
-                Savings: ₹19.85 L (4.96%)
+                Savings: ₹20.88 L (5.22%) vs Budget
               </span>
             </div>
             <p className="text-sm text-slate-600 leading-relaxed">
-              While Scenario A offers ₹3.77 Cr total spend, it allocates critical lines to <strong>Vendor 4 (Sri Balaji Packaging)</strong> whose ISO 9001:2015 certificate expired in October 2026. Enforcing the quality gate in <strong>Scenario B</strong> eliminates all certification, lab testing, and rejection-rate risks for a nominal compliance premium of <strong>+₹2.75 Lakhs (+0.73%)</strong>.
+              While Scenario A offers ₹3.74 Cr total spend, it allocates critical lines to <strong>Vendor 4 (Sri Balaji Packaging)</strong> whose ISO 9001:2015 certificate expired in October 2026. Enforcing the quality gate in <strong>Scenario B</strong> eliminates all certification, lab testing, and rejection-rate risks for a compliance premium of <strong>+₹4.69 Lakhs (+1.25% higher than Scenario A)</strong>.
             </p>
             <div className="pt-2 flex items-center gap-3 text-xs text-slate-500 flex-wrap">
               <span className="font-semibold text-slate-700">Recommended Allocation:</span>

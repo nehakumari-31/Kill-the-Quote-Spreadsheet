@@ -562,7 +562,10 @@ def normalize_price(
         tax_treatment=tax_treatment_desc,
         applied_discount=discount_pct if (discount_pct > 0 and condition_met) else 0.0,
         discount_condition=discount_condition,
-        unresolved_reason=None
+        unresolved_reason=None,
+        converted_inr_price=round(price_in_inr, 4) if is_foreign_currency else (quoted_numeric if quoted_numeric is not None else None),
+        converted_inr_uom=orig_uom,
+        normalized_uom=target_uom
     )
 
 
@@ -650,21 +653,16 @@ def parse_vendor_cell_edit(
 
     # 4. Infer unit and currency from user string input
     lower_str = edited_str.lower()
+    is_usd = "$" in lower_str or "usd" in lower_str
+    raw_curr = "USD" if is_usd else "INR"
     if any(k in lower_str for k in ["/kg", "per kg", "₹/kg", "rs/kg", "inr/kg", "kg"]):
-        raw_unit = "₹/kg"
-        raw_curr = "INR"
+        raw_unit = "kg"
     elif any(k in lower_str for k in ["1000", "per 1000", "/1000", "thousand"]):
         raw_unit = "per 1,000 Nos"
-        raw_curr = "INR"
     elif any(k in lower_str for k in ["/sqm", "per sqm", "sqm", "m2"]):
         raw_unit = "sqm"
-        raw_curr = "INR"
-    elif "usd" in lower_str or "$" in lower_str:
-        raw_unit = "Nos"
-        raw_curr = "USD"
     else:
         raw_unit = "Nos"
-        raw_curr = "INR"
 
     norm_res = normalize_price(
         raw_value=edited_str,

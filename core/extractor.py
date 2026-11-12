@@ -362,11 +362,35 @@ def _parse_docx_file(file_bytes: bytes, filename: str, meta: QuotationMetadata):
             status = "Verified" if p_val is not None else ("Missing" if is_omitted else "Needs Review")
             conf = 0.95 if p_val is not None else 0.90
 
+            # Deterministic UOM extraction:
+            # Preserve original quoted UOM; currency conversion must never change UOM,
+            # and currency name (e.g. 'USD') must never be used as a UOM.
+            match_uom = re.search(r"/\s*(Nos|kg|sqm|box|pcs|pieces?|sets?|ea|each)\b", f"{price_raw} {notes_raw}", re.IGNORECASE)
+            if match_uom:
+                raw_u = match_uom.group(1).capitalize()
+                if raw_u.lower() in ["nos", "pcs", "piece", "pieces", "ea", "each"]:
+                    extracted_unit = "Nos"
+                elif raw_u.lower() in ["kg", "kgs"]:
+                    extracted_unit = "kg"
+                elif raw_u.lower() in ["sqm", "m2"]:
+                    extracted_unit = "sqm"
+                else:
+                    extracted_unit = raw_u
+            elif is_omitted or p_val is None:
+                extracted_unit = "Nos"
+            elif any(k in f"{price_raw} {notes_raw}".lower() for k in ["nos", "piece", "pcs"]):
+                extracted_unit = "Nos"
+            else:
+                # Ambiguous source UOM: do not silently assign a UOM; flag for review
+                extracted_unit = "Ambiguous"
+                status = "Needs Review"
+                conf = 0.60
+
             meta.fields.append(ExtractedField(
                 line_item=line_no,
                 item_code=code_val,
                 price=p_val,
-                unit="USD" if meta.currency == "USD" else "Nos",
+                unit=extracted_unit,
                 currency=meta.currency,
                 source_reference=f"Table {t_idx+1}, Row {r_idx}",
                 confidence_score=conf,
